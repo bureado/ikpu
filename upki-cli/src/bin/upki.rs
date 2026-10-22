@@ -1,17 +1,19 @@
 //! upki command-line entrypoint.
 
-use std::io::{BufReader, stdin};
+use std::fs::File;
+use std::io::{BufReader, Write, stdin};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use eyre::{Context, Report};
+use eyre::{Context, Report, bail};
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use upki::cert_store::{CertificateStore, Fingerprint};
 #[cfg(feature = "__fetch")]
 use upki::fetch;
 use upki::revocation::{RevocationCheckInput, Store};
@@ -19,13 +21,17 @@ use upki::{Config, ConfigPath};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<ExitCode, Report> {
-    let args = Args::parse();
+    let Args {
+        command,
+        config_file,
+        verbose,
+    } = Args::parse();
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().compact())
         .with(
             EnvFilter::builder()
                 .with_default_directive(
-                    match args.verbose {
+                    match verbose {
                         true => LevelFilter::TRACE,
                         false => LevelFilter::ERROR,
                     }
@@ -35,17 +41,21 @@ async fn main() -> Result<ExitCode, Report> {
         )
         .init();
 
-    let config_path =
-        ConfigPath::new(args.config_file).wrap_err("cannot find configuration path")?;
+    let command = match command {
+        Command::CertStore(command) => return run_cert_store(command),
+        command => command,
+    };
 
-    if let Command::ShowConfigPath = args.command {
+    let config_path = ConfigPath::new(config_file).wrap_err("cannot find configuration path")?;
+
+    if let Command::ShowConfigPath = command {
         println!("{}", config_path.as_ref().display());
         return Ok(ExitCode::SUCCESS);
     }
 
     let config = Config::from_file_or_user_default(&config_path)?;
 
-    Ok(match args.command {
+    Ok(match command {
         #[cfg(feature = "__fetch")]
         Command::Fetch { dry_run } => {
             fetch(dry_run, &config).await?;
@@ -57,6 +67,7 @@ async fn main() -> Result<ExitCode, Report> {
             ExitCode::SUCCESS
         }
         Command::ShowConfigPath => unreachable!(),
+        Command::CertStore(_) => unreachable!(),
         Command::ShowConfig => {
             print!(
                 "{}",
@@ -77,6 +88,49 @@ async fn main() -> Result<ExitCode, Report> {
                 .to_cli()
         }
     })
+}
+
+fn run_cert_store(command: CertStoreCommand) -> Result<ExitCode, Report> {
+    match command {
+        CertStoreCommand::SyncUbuntu { store, bundle } => {
+            let file = File::open(&bundle)
+                .wrap_err_with(|| format!("cannot open Ubuntu CA bundle {}", bundle.display()))?;
+            let mut reader = BufReader::new(file);
+            let certificates = CertificateDer::pem_reader_iter(&mut reader)
+                .collect::<Result<Vec<_>, _>>()
+                .wrap_err("cannot parse Ubuntu CA bundle")?;
+            if certificates.is_empty() {
+                bail!("Ubuntu CA bundle contains no certificates");
+            }
+
+            let mut certificate_store = CertificateStore::new();
+            for certificate in &certificates {
+                certificate_store.add(certificate.as_ref())?;
+            }
+            certificate_store.save(&store)?;
+            eprintln!(
+                "Synchronized {} certificates to {}",
+                certificate_store.len(),
+                store.display()
+            );
+        }
+        CertStoreCommand::List { store } => {
+            let certificate_store = CertificateStore::open(&store)?;
+            for (fingerprint, _) in certificate_store.iter() {
+                println!("{}", fingerprint.to_hex());
+            }
+        }
+        CertStoreCommand::Export { store, fingerprint } => {
+            let certificate_store = CertificateStore::open(&store)?;
+            let fingerprint = Fingerprint::from_hex(&fingerprint)?;
+            let der = certificate_store
+                .get(&fingerprint)
+                .ok_or_else(|| eyre::eyre!("certificate not found: {}", fingerprint.to_hex()))?;
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(der)?;
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 #[derive(Debug, Parser)]
@@ -125,11 +179,48 @@ enum Command {
     #[clap(subcommand)]
     Revocation(Revocation),
 
+    /// Maintain and query the independent certificate store.
+    #[clap(subcommand)]
+    CertStore(CertStoreCommand),
+
     /// Print the location of the configuration file.
     ShowConfigPath,
 
     /// Print the configuration that will be used.
     ShowConfig,
+}
+
+#[derive(Debug, Subcommand)]
+enum CertStoreCommand {
+    /// Replace the store from Ubuntu's generated system CA bundle.
+    ///
+    /// Run this after update-ca-certificates, such as from a package postinst
+    /// script or /etc/ca-certificates/update.d hook.
+    SyncUbuntu {
+        /// Destination snapshot file.
+        #[arg(long)]
+        store: PathBuf,
+        /// Ubuntu/Debian generated bundle.
+        #[arg(long, default_value = "/etc/ssl/certs/ca-certificates.crt")]
+        bundle: PathBuf,
+    },
+
+    /// Print fingerprints for certificates in a store.
+    List {
+        /// Store snapshot file.
+        #[arg(long)]
+        store: PathBuf,
+    },
+
+    /// Write one certificate's DER bytes to standard output.
+    Export {
+        /// Store snapshot file.
+        #[arg(long)]
+        store: PathBuf,
+        /// 64-digit hexadecimal SHA-256 fingerprint.
+        #[arg(long)]
+        fingerprint: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

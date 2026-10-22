@@ -12,7 +12,7 @@ default = []
 capi = []
 fetch = ["reqwest/default-tls", "__fetch"]
 fetch-native-tls = ["reqwest/native-tls", "__fetch"]
-__fetch = ["dep:jiff", "dep:reqwest", "dep:serde_json", "dep:tempfile"]
+__fetch = ["dep:jiff", "dep:reqwest", "dep:serde_json"]
 
 [dependencies]
 base64.workspace = true
@@ -25,7 +25,7 @@ rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
 toml.workspace = true
 tracing.workspace = true
 
@@ -34,7 +34,6 @@ cbindgen.workspace = true
 clubcard.workspace = true
 clubcard-crlite = { workspace = true, features = ["builder"] }
 similar-asserts.workspace = true
-tempfile.workspace = true
 
 [lints]
 workspace = true

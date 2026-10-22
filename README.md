@@ -77,6 +77,23 @@ directly by processing the revocation cache directory `index.bin`, and
 accompanying serialized clubcard data, as described by the [C2SP upki-revocation
 specification](https://c2sp.org/upki-revocation@v1.0.0).
 
+# Certificate store
+
+`upki::cert_store::CertificateStore` provides an experimental independent
+snapshot for storing, looking up, and exporting certificates by SHA-256
+fingerprint. The CLI can replace a snapshot from Ubuntu/Debian's generated
+system bundle after `update-ca-certificates`:
+
+```shell
+upki cert-store sync-ubuntu --store /var/lib/upki/certificates.store
+upki cert-store list --store /var/lib/upki/certificates.store
+upki cert-store export --store /var/lib/upki/certificates.store --fingerprint <sha256>
+```
+
+This initial feature does not yet verify certificate chains or model
+distribution trust/distrust policy. See [CERTIFICATE-STORE.md](CERTIFICATE-STORE.md)
+for the research, current limitations, and implementation roadmap.
+
 # Packaging
 
 See [PACKAGING.md](PACKAGING.md).

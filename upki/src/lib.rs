@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod sha256;
 
+/// An indexed, checksummed certificate store.
+pub mod cert_store;
+
 /// Determining revocation status of publicly trusted certificates.
 pub mod revocation;
 use crate::revocation::RevocationConfig;
