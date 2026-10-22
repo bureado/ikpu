@@ -1,11 +1,10 @@
 //! upki command-line entrypoint.
 
-use std::fs::File;
 use std::io::{BufReader, Write, stdin};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Context, Report, bail};
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject;
@@ -13,10 +12,11 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use upki::cert_store::distro::{DebianUbuntu, IngestionStrategy};
 use upki::cert_store::{CertificateStore, Fingerprint};
 #[cfg(feature = "__fetch")]
 use upki::fetch;
-use upki::revocation::{RevocationCheckInput, Store};
+use upki::revocation::{RevocationCheckInput, RevocationStatus, Store};
 use upki::{Config, ConfigPath};
 
 #[tokio::main(flavor = "current_thread")]
@@ -42,7 +42,7 @@ async fn main() -> Result<ExitCode, Report> {
         .init();
 
     let command = match command {
-        Command::CertStore(command) => return run_cert_store(command),
+        Command::CertStore(command) => return run_cert_store(command, config_file),
         command => command,
     };
 
@@ -90,27 +90,53 @@ async fn main() -> Result<ExitCode, Report> {
     })
 }
 
-fn run_cert_store(command: CertStoreCommand) -> Result<ExitCode, Report> {
+fn run_cert_store(
+    command: CertStoreCommand,
+    config_file: Option<PathBuf>,
+) -> Result<ExitCode, Report> {
     match command {
-        CertStoreCommand::SyncUbuntu { store, bundle } => {
-            let file = File::open(&bundle)
-                .wrap_err_with(|| format!("cannot open Ubuntu CA bundle {}", bundle.display()))?;
-            let mut reader = BufReader::new(file);
+        CertStoreCommand::Sync {
+            store,
+            bundle,
+            distro,
+            allow_revoked,
+        } => {
+            let distro = distro.unwrap_or(detect_distro()?);
+            let strategy = DebianUbuntu::new(bundle);
+            let certificates = strategy.load()?;
+            let revocation_store = revocation_store(config_file)?;
+            let certificates = filter_revoked(certificates, &revocation_store, allow_revoked)?;
+            let mut certificate_store = open_certificate_store(&store)?;
+            strategy.reconcile(&mut certificate_store, &certificates)?;
+            certificate_store.save(&store)?;
+            eprintln!(
+                "Synchronized {} {} certificates to {}",
+                distro,
+                certificate_store.len(),
+                store.display()
+            );
+        }
+        CertStoreCommand::Import {
+            store,
+            allow_revoked,
+        } => {
+            let mut reader = BufReader::new(stdin());
             let certificates = CertificateDer::pem_reader_iter(&mut reader)
                 .collect::<Result<Vec<_>, _>>()
-                .wrap_err("cannot parse Ubuntu CA bundle")?;
+                .wrap_err("cannot parse certificates from stdin")?;
             if certificates.is_empty() {
-                bail!("Ubuntu CA bundle contains no certificates");
+                bail!("standard input contains no certificates");
             }
-
-            let mut certificate_store = CertificateStore::new();
+            let revocation_store = revocation_store(config_file)?;
+            let certificates = filter_revoked(certificates, &revocation_store, allow_revoked)?;
+            let mut certificate_store = open_certificate_store(&store)?;
             for certificate in &certificates {
                 certificate_store.add(certificate.as_ref())?;
             }
             certificate_store.save(&store)?;
             eprintln!(
-                "Synchronized {} certificates to {}",
-                certificate_store.len(),
+                "Imported {} manual certificates to {}",
+                certificates.len(),
                 store.display()
             );
         }
@@ -131,6 +157,62 @@ fn run_cert_store(command: CertStoreCommand) -> Result<ExitCode, Report> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn detect_distro() -> Result<CertStoreDistro, Report> {
+    let distro = whatadistro::Distro::current()
+        .ok_or_else(|| eyre::eyre!("cannot detect distribution; pass --distro explicitly"))?;
+    match distro.id().to_string().as_str() {
+        "debian" => Ok(CertStoreDistro::Debian),
+        "ubuntu" => Ok(CertStoreDistro::Ubuntu),
+        detected => bail!(
+            "automatic certificate-store sync is unsupported for {detected}; pass --distro debian or ubuntu"
+        ),
+    }
+}
+
+fn revocation_store(config_file: Option<PathBuf>) -> Result<Store, Report> {
+    let config_path = ConfigPath::new(config_file).wrap_err("cannot find configuration path")?;
+    let config = Config::from_file_or_user_default(&config_path)?;
+    Ok(Store::from_config(&config))
+}
+
+fn filter_revoked(
+    certificates: Vec<CertificateDer<'static>>,
+    revocation_store: &Store,
+    allow_revoked: bool,
+) -> Result<Vec<CertificateDer<'static>>, Report> {
+    let mut accepted = Vec::with_capacity(certificates.len());
+    for certificate in &certificates {
+        let mut chain = Vec::with_capacity(certificates.len() + 1);
+        chain.push(certificate.clone());
+        chain.extend(certificates.iter().cloned());
+        let input = RevocationCheckInput::from_certificates(&chain)
+            .wrap_err("cannot prepare certificate revocation check")?;
+        match revocation_store
+            .check(&input)
+            .wrap_err("cannot check certificate revocation")?
+        {
+            RevocationStatus::CertainlyRevoked if !allow_revoked => {
+                let fingerprint = CertificateStore::new()
+                    .add(certificate.as_ref())?
+                    .to_hex();
+                eprintln!("Skipping revoked certificate {fingerprint}");
+            }
+            _ => accepted.push(certificate.clone()),
+        }
+    }
+    Ok(accepted)
+}
+
+fn open_certificate_store(path: &std::path::Path) -> Result<CertificateStore, Report> {
+    match CertificateStore::open(path) {
+        Ok(store) => Ok(store),
+        Err(upki::cert_store::Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(CertificateStore::new())
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -192,17 +274,32 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum CertStoreCommand {
-    /// Replace the store from Ubuntu's generated system CA bundle.
+    /// Replace distro-managed entries from the generated system certificate source.
     ///
-    /// Run this after update-ca-certificates, such as from a package postinst
-    /// script or /etc/ca-certificates/update.d hook.
-    SyncUbuntu {
+    /// Run after the distro updates its trust store, such as from a package hook.
+    Sync {
         /// Destination snapshot file.
         #[arg(long)]
         store: PathBuf,
-        /// Ubuntu/Debian generated bundle.
-        #[arg(long, default_value = "/etc/ssl/certs/ca-certificates.crt")]
-        bundle: PathBuf,
+        /// Distro adapter to use (autodetected when omitted).
+        #[arg(long, value_enum)]
+        distro: Option<CertStoreDistro>,
+        /// Override the adapter's default generated bundle path.
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+        /// Allow certificates known to be revoked by the local revocation data.
+        #[arg(long)]
+        allow_revoked: bool,
+    },
+
+    /// Import administrator-managed certificates from PEM on standard input.
+    Import {
+        /// Destination snapshot file.
+        #[arg(long)]
+        store: PathBuf,
+        /// Allow certificates known to be revoked by the local revocation data.
+        #[arg(long)]
+        allow_revoked: bool,
     },
 
     /// Print fingerprints for certificates in a store.
@@ -221,6 +318,21 @@ enum CertStoreCommand {
         #[arg(long)]
         fingerprint: String,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CertStoreDistro {
+    Debian,
+    Ubuntu,
+}
+
+impl std::fmt::Display for CertStoreDistro {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Debian => f.write_str("Debian"),
+            Self::Ubuntu => f.write_str("Ubuntu"),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

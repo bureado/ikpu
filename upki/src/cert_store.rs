@@ -11,7 +11,11 @@ use std::path::Path;
 
 use crate::sha256;
 
-const MAGIC: &[u8; 8] = b"upkics01";
+/// Distro-specific certificate-store adapters.
+pub mod distro;
+
+const MAGIC_V1: &[u8; 8] = b"upkics01";
+const MAGIC: &[u8; 8] = b"upkics02";
 const CHECKSUM_SIZE: usize = 32;
 const MAX_STORE_SIZE: usize = 64 * 1024 * 1024;
 
@@ -61,7 +65,19 @@ impl Fingerprint {
 /// has a trailing SHA-256 checksum to detect accidental corruption.
 #[derive(Debug, Default)]
 pub struct CertificateStore {
-    certificates: BTreeMap<Fingerprint, Vec<u8>>,
+    certificates: BTreeMap<Fingerprint, Certificate>,
+}
+
+#[derive(Debug)]
+struct Certificate {
+    der: Vec<u8>,
+    source: CertificateSource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CertificateSource {
+    Manual,
+    Distro,
 }
 
 impl CertificateStore {
@@ -88,15 +104,55 @@ impl CertificateStore {
     /// fingerprint can be used to retrieve or remove the certificate.
     pub fn add(&mut self, der: &[u8]) -> Result<Fingerprint, Error> {
         let fingerprint = Fingerprint(sha256::Digest::from(&[der][..]).0);
-        if let Some(existing) = self.certificates.get(&fingerprint) {
-            if existing != der {
+        if let Some(existing) = self.certificates.get_mut(&fingerprint) {
+            if existing.der != der {
                 return Err(Error::FingerprintCollision);
             }
+            existing.source = CertificateSource::Manual;
         } else {
-            self.certificates
-                .insert(fingerprint, der.to_vec());
+            self.certificates.insert(
+                fingerprint,
+                Certificate {
+                    der: der.to_vec(),
+                    source: CertificateSource::Manual,
+                },
+            );
         }
         Ok(fingerprint)
+    }
+
+    /// Replace the distro-managed certificates with an authoritative source snapshot.
+    ///
+    /// Certificates already imported manually are retained and take precedence.
+    /// Existing distro certificates with matching fingerprints are not copied again.
+    pub fn sync_distro<'a>(
+        &mut self,
+        certificates: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<(), Error> {
+        let mut desired = std::collections::BTreeSet::new();
+        for der in certificates {
+            let fingerprint = Fingerprint(sha256::Digest::from(&[der][..]).0);
+            desired.insert(fingerprint);
+            if let Some(existing) = self.certificates.get(&fingerprint) {
+                if existing.der != der {
+                    return Err(Error::FingerprintCollision);
+                }
+            } else {
+                self.certificates.insert(
+                    fingerprint,
+                    Certificate {
+                        der: der.to_vec(),
+                        source: CertificateSource::Distro,
+                    },
+                );
+            }
+        }
+
+        self.certificates
+            .retain(|fingerprint, certificate| {
+                certificate.source == CertificateSource::Manual || desired.contains(fingerprint)
+            });
+        Ok(())
     }
 
     /// Remove the certificate identified by `fingerprint`.
@@ -110,14 +166,14 @@ impl CertificateStore {
     pub fn get(&self, fingerprint: &Fingerprint) -> Option<&[u8]> {
         self.certificates
             .get(fingerprint)
-            .map(Vec::as_slice)
+            .map(|certificate| certificate.der.as_slice())
     }
 
     /// Iterate over certificates in fingerprint order.
     pub fn iter(&self) -> impl Iterator<Item = (Fingerprint, &[u8])> {
         self.certificates
             .iter()
-            .map(|(fingerprint, der)| (*fingerprint, der.as_slice()))
+            .map(|(fingerprint, certificate)| (*fingerprint, certificate.der.as_slice()))
     }
 
     /// Return the number of certificates in the store.
@@ -168,11 +224,15 @@ impl CertificateStore {
         bytes.extend_from_slice(MAGIC);
         bytes.extend_from_slice(&count.to_be_bytes());
 
-        for (fingerprint, der) in &self.certificates {
-            let len = u32::try_from(der.len()).map_err(|_| Error::StoreTooLarge)?;
+        for (fingerprint, certificate) in &self.certificates {
+            let len = u32::try_from(certificate.der.len()).map_err(|_| Error::StoreTooLarge)?;
             bytes.extend_from_slice(&fingerprint.0);
+            bytes.push(match certificate.source {
+                CertificateSource::Manual => 0,
+                CertificateSource::Distro => 1,
+            });
             bytes.extend_from_slice(&len.to_be_bytes());
-            bytes.extend_from_slice(der);
+            bytes.extend_from_slice(&certificate.der);
             if bytes.len() > MAX_STORE_SIZE - CHECKSUM_SIZE {
                 return Err(Error::StoreTooLarge);
             }
@@ -188,7 +248,14 @@ impl CertificateStore {
             return Err(Error::InvalidStore);
         }
         let payload_len = bytes.len() - CHECKSUM_SIZE;
-        if bytes.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
+        let version = match bytes.get(..MAGIC.len()) {
+            Some(magic) if magic == MAGIC => 2,
+            Some(magic) if magic == MAGIC_V1 => 1,
+            _ => return Err(Error::InvalidStore),
+        };
+        if bytes.get(..MAGIC.len()) != Some(MAGIC.as_slice())
+            && bytes.get(..MAGIC.len()) != Some(MAGIC_V1.as_slice())
+        {
             return Err(Error::InvalidStore);
         }
         let checksum = sha256::Digest::from(&[&bytes[..payload_len]][..]);
@@ -211,6 +278,15 @@ impl CertificateStore {
                     .try_into()
                     .map_err(|_| Error::InvalidStore)?,
             );
+            let source = if version == 1 {
+                CertificateSource::Manual
+            } else {
+                match take(bytes, &mut cursor, 1, payload_len)?[0] {
+                    0 => CertificateSource::Manual,
+                    1 => CertificateSource::Distro,
+                    _ => return Err(Error::InvalidStore),
+                }
+            };
             let len_bytes = take(bytes, &mut cursor, 4, payload_len)?;
             let len = u32::from_be_bytes(
                 len_bytes
@@ -223,7 +299,7 @@ impl CertificateStore {
                 return Err(Error::FingerprintMismatch);
             }
             if certificates
-                .insert(fingerprint, der)
+                .insert(fingerprint, Certificate { der, source })
                 .is_some()
             {
                 return Err(Error::DuplicateFingerprint);
@@ -349,6 +425,58 @@ mod tests {
             CertificateStore::decode(&bytes),
             Err(Error::ChecksumMismatch)
         ));
+    }
+
+    #[test]
+    fn distro_sync_reconciles_and_preserves_manual_certificates() {
+        let mut store = CertificateStore::new();
+        store
+            .sync_distro([b"old distro certificate".as_slice()])
+            .unwrap();
+        let distro =
+            Fingerprint(sha256::Digest::from(&[b"old distro certificate".as_slice()][..]).0);
+        let manual = store
+            .add(b"manual certificate")
+            .unwrap();
+
+        store
+            .sync_distro([b"new distro certificate".as_slice()])
+            .unwrap();
+
+        assert!(store.get(&distro).is_none());
+        assert!(store.get(&manual).is_some());
+        assert_eq!(store.len(), 2);
+
+        let manual_precedence = store
+            .add(b"shared certificate")
+            .unwrap();
+        store
+            .sync_distro([b"shared certificate".as_slice()])
+            .unwrap();
+        store
+            .sync_distro(std::iter::empty::<&[u8]>())
+            .unwrap();
+        assert!(store.get(&manual_precedence).is_some());
+    }
+
+    #[test]
+    fn snapshots_retain_certificate_sources() {
+        let mut store = CertificateStore::new();
+        let manual = store.add(b"manual").unwrap();
+        store
+            .sync_distro([b"distro".as_slice()])
+            .unwrap();
+        let distro = Fingerprint(sha256::Digest::from(&[b"distro".as_slice()][..]).0);
+
+        let loaded = CertificateStore::decode(&store.encode().unwrap()).unwrap();
+        assert_eq!(loaded.get(&manual), Some(b"manual".as_slice()));
+        assert_eq!(loaded.get(&distro), Some(b"distro".as_slice()));
+        let mut loaded = loaded;
+        loaded
+            .sync_distro(std::iter::empty::<&[u8]>())
+            .unwrap();
+        assert!(loaded.get(&manual).is_some());
+        assert!(loaded.get(&distro).is_none());
     }
 
     #[test]
