@@ -86,6 +86,67 @@ system paths, and OpenSSL compatibility notes are specified in
 The CLI does not invoke `update-ca-certificates` itself or install package
 hooks.
 
+## Experimental verification interfaces
+
+The feature prototype separates selecting anchors from verifying a particular
+certificate purpose:
+
+- `CertificateStore::verify_chain` uses webpki with caller-supplied signature
+  algorithms and an explicit EKU validator. It returns the selected anchor
+  fingerprint and verified intermediates. It does not check identity, signed
+  application content, or revocation.
+- `rustls_upki::root_store_from_cert_store` supplies roots to rustls server or
+  client verifiers. `load_root_store` discovers the snapshot through the
+  optional `cert-store` configuration key. Use `ServerVerifier` separately to
+  retain upki's existing revocation checks.
+- The C API opens snapshots, enumerates borrowed DER certificates for loading
+  into a caller's verifier, and checks membership in an already-verified chain.
+  It adds no signature-verification backend, matching the existing separation
+  in `upki_check_revocation`. Membership is not chain verification: never pass
+  a peer-presented chain, which can contain arbitrary appended certificates.
+- `upki_openssl_load_cert_store` adds anchors to an `X509_STORE`, leaving
+  verification and purpose policy to OpenSSL. The separate constraining
+  callback rejects otherwise valid chains that do not reach the upki store.
+  It does not rescue failed verification or enable hostname checking; callers
+  must configure identity checks. The existing revocation callback is separate.
+
+For discovery, an upki configuration file can include:
+
+```toml
+cert-store = "/var/lib/upki/certificates.store"
+```
+
+Snapshots are loaded into memory; recreate consumers to observe updates.
+The store currently records certificate provenance, not per-purpose trust,
+explicit distrust, or intermediate-blocking policy. Treating every stored
+certificate as an anchor is therefore experimental, not an implementation of
+the distro's complete trust policy. Parsing failures are skipped by the anchor
+adapters; a loader may produce an empty usable anchor set. OpenSSL loading is
+additive and can partially modify its destination before returning an error;
+use a fresh store and discard it on failure.
+
+### Coverage and remaining investigation
+
+Explicit library integration reaches applications that use these APIs, not
+every process on the machine. A generic EKU check is not complete code-signing,
+CMS, S/MIME, or timestamp verification: each consumer must retain its own
+identity, content-signature, time, and policy checks.
+
+TLS interception changes where verification happens, not automatically which
+store it uses. An eBPF observation tool such as Beyla should not be assumed to
+perform or control peer verification. A terminating MITM proxy verifies the
+upstream peer using its own stack, while the client separately verifies the
+proxy certificate. Squid peek/splice does not necessarily terminate the TLS
+connection. Both verification endpoints need explicit configuration where
+termination occurs. Proxy-routing tools such as emBarrass exercise the tested
+application's trust decisions rather than automatically enrolling this store.
+No interception mechanism or universal process hook is implemented here.
+
+Further work includes stronger malformed-input and ownership coverage,
+consistent handling of unusable anchors, purpose-specific trust/distrust
+semantics, and verified deployment recipes for individual consumers. The
+filesystem-based compatibility fallback remains separate future work.
+
 ## Proposed roadmap
 
 1. **Harden the core model.** Decide whether records represent certificates

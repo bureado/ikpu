@@ -12,13 +12,16 @@ use openssl_sys::{
     CRYPTO_EX_DATA, CRYPTO_EX_INDEX_SSL_CTX, CRYPTO_get_ex_new_index, ERR_PACK, ERR_STRING_DATA,
     ERR_get_next_error_library, ERR_load_strings, ERR_new, ERR_set_debug, ERR_set_error,
     OPENSSL_free, OPENSSL_sk_num, OPENSSL_sk_value, SSL, SSL_CTX, SSL_CTX_get_ex_data,
-    SSL_CTX_set_ex_data, SSL_get_SSL_CTX, SSL_get_ex_data_X509_STORE_CTX_idx, X509, X509_STORE_CTX,
-    X509_STORE_CTX_get_error_depth, X509_STORE_CTX_get_ex_data, X509_STORE_CTX_get0_chain,
-    X509_STORE_CTX_set_error, X509_V_ERR_APPLICATION_VERIFICATION, X509_V_ERR_CERT_REVOKED,
-    i2d_X509, stack_st_X509,
+    SSL_CTX_set_ex_data, SSL_get_SSL_CTX, SSL_get_ex_data_X509_STORE_CTX_idx, X509, X509_STORE,
+    X509_STORE_CTX, X509_STORE_CTX_get_error_depth, X509_STORE_CTX_get_ex_data,
+    X509_STORE_CTX_get0_chain, X509_STORE_CTX_set_error, X509_STORE_add_cert,
+    X509_V_ERR_APPLICATION_VERIFICATION, X509_V_ERR_CERT_REVOKED, X509_V_ERR_CERT_UNTRUSTED,
+    X509_free, d2i_X509, i2d_X509, stack_st_X509,
 };
 use rustls_pki_types::CertificateDer;
 use upki::ffi::{
+    upki_cert_store, upki_cert_store_check_verified_chain, upki_cert_store_free,
+    upki_cert_store_get, upki_cert_store_len, upki_cert_store_open_from_config,
     upki_certificate_der, upki_check_revocation, upki_config, upki_config_free, upki_config_new,
     upki_result,
 };
@@ -170,6 +173,209 @@ pub unsafe extern "C" fn upki_openssl_verify_callback(
     preverify_ok
 }
 
+/// Adds every certificate in `certs` to `store` as a trust anchor.
+///
+/// This is the broadest OpenSSL integration: anything that verifies against
+/// the `X509_STORE` (TLS via `SSL_CTX_get_cert_store()`, CMS/S/MIME, timestamp
+/// and other `X509_verify_cert()` users) can then build chains to the upki
+/// store, for whatever purpose it is verifying. It augments, rather than
+/// replaces, anchors already in `store`; use a fresh `X509_STORE` to make the
+/// upki store the only source of trust.
+///
+/// Certificates are copied, so `certs` may be freed afterwards. Certificates
+/// OpenSSL cannot parse are skipped.
+///
+/// Returns the number of certificates added, or -1 if an argument is NULL or
+/// OpenSSL fails to add a certificate.
+///
+/// # Safety
+///
+/// `store` must be a valid `X509_STORE` pointer or NULL. `certs` must be a valid
+/// `upki_cert_store` pointer or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn upki_openssl_load_cert_store(
+    store: *mut X509_STORE,
+    certs: *const upki_cert_store,
+) -> c_int {
+    if store.is_null() || certs.is_null() {
+        return -1;
+    }
+
+    // SAFETY: `certs` is a valid store pointer, required by our caller.
+    let len = unsafe { upki_cert_store_len(certs) };
+    let mut added: c_int = 0;
+    for index in 0..len {
+        let mut der = upki_certificate_der {
+            data: ptr::null(),
+            len: 0,
+        };
+        // SAFETY: `certs` is valid and `der` is writable.
+        let rc = unsafe { upki_cert_store_get(certs, index, &mut der) };
+        if !matches!(rc, upki_result::UPKI_OK) {
+            return -1;
+        }
+        let Ok(der_len) = c_long::try_from(der.len) else {
+            continue;
+        };
+
+        let mut data = der.data;
+        // SAFETY: `data` points to `der_len` bytes owned by `certs`.
+        let x509 = unsafe { d2i_X509(ptr::null_mut(), &mut data, der_len) };
+        if x509.is_null() {
+            continue;
+        }
+
+        // SAFETY: `store` and `x509` are valid. `X509_STORE_add_cert` takes its own
+        // reference, so we release ours afterwards.
+        let ok = unsafe { X509_STORE_add_cert(store, x509) };
+        // SAFETY: `x509` was allocated by `d2i_X509` above.
+        unsafe { X509_free(x509) };
+        if ok != 1 {
+            return -1;
+        }
+        added = added.saturating_add(1);
+    }
+
+    added
+}
+
+/// Sets the upki certificate store to use for connections based upon `ctx`.
+///
+/// This is consulted by `upki_openssl_cert_store_verify_callback()`.
+///
+/// `certs` becomes owned by `SSL_CTX`.  If `certs` is NULL the previous store is
+/// freed.
+///
+/// # Safety
+///
+/// This does nothing if `ctx` is NULL.  `certs` is required to be a valid
+/// `upki_cert_store` pointer, or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn upki_openssl_set_cert_store(
+    ctx: *mut SSL_CTX,
+    certs: *const upki_cert_store,
+) {
+    if ctx.is_null() {
+        return;
+    }
+
+    let Some(index) = *UPKI_SSL_CTX_CERT_STORE_INDEX else {
+        return;
+    };
+
+    // SAFETY: `upki_cert_store_free` is defined for a previous valid pointer, or NULL.
+    // `SSL_CTX_get_ex_data` only returns NULL or a pointer given to `SSL_CTX_set_ex_data`.
+    unsafe {
+        upki_cert_store_free(SSL_CTX_get_ex_data(ctx, index).cast());
+    }
+
+    // SAFETY: `ctx` is required to be non-NULL (as established above).
+    unsafe {
+        SSL_CTX_set_ex_data(ctx, index, certs.cast_mut().cast());
+    }
+}
+
+/// Requires the verified chain to reach the upki certificate store, matching
+/// OpenSSL's `SSL_verify_cb` interface.
+///
+/// This *constrains* OpenSSL's own verification: OpenSSL still builds and
+/// verifies the chain against its `X509_STORE` (signatures, validity, purpose
+/// and hostname checks), and this callback then rejects the result unless a
+/// certificate in that verified chain is in the upki store. Combine it with
+/// `upki_openssl_load_cert_store()` to make the upki store both the source and
+/// the constraint of trust. It never turns a failed verification into success.
+///
+/// Only one verify callback can be installed; to also check revocation, call
+/// this and `upki_openssl_verify_callback()` from your own callback and
+/// require both to succeed.
+///
+/// This function returns 0 if called with 0 for the `preverify_ok` parameter.
+///
+/// # Store selection
+///
+/// If `upki_openssl_set_cert_store()` was previously called against the `SSL_CTX`
+/// available from `X509_STORE_CTX`, that store is used.  Otherwise the store named
+/// by the `cert-store` key of the default upki configuration file is opened.
+///
+/// # Errors
+///
+/// If the verified chain does not reach the upki store, this function returns 0
+/// and sets the `X509_V_ERR_CERT_UNTRUSTED` error on `x509_ctx`.
+///
+/// If no store can be loaded, this function returns 0, sets the
+/// `X509_V_ERR_APPLICATION_VERIFICATION` error on `x509_ctx`, and adds a report to
+/// the OpenSSL error stack.
+///
+/// # Safety
+///
+/// This function requires that `x509_ctx` is a valid pointer, or NULL.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn upki_openssl_cert_store_verify_callback(
+    preverify_ok: c_int,
+    x509_ctx: *mut X509_STORE_CTX,
+) -> c_int {
+    if preverify_ok == 0 {
+        return preverify_ok;
+    }
+
+    // SAFETY: We rely on the caller providing a valid or NULL `x509_ctx` pointer.
+    let Some(mut x509_ctx) = (unsafe { BorrowedX509StoreCtx::from_ptr(x509_ctx) }) else {
+        return 0;
+    };
+
+    // Only check the complete chain, at the final (leaf) callback.
+    if x509_ctx.error_depth() != 0 {
+        return preverify_ok;
+    }
+
+    let Some(chain) = x509_ctx.chain() else {
+        return 0;
+    };
+
+    let Some(certs) = chain.copy_certs() else {
+        return 0;
+    };
+
+    let cert_descriptors = certs
+        .iter()
+        .map(BorrowedUpkiCertificateDer::from_cert)
+        .collect::<Vec<BorrowedUpkiCertificateDer<'_>>>();
+
+    if cert_descriptors.is_empty() {
+        x509_ctx.set_error(X509_V_ERR_APPLICATION_VERIFICATION);
+        return 0;
+    }
+
+    let store = match UpkiCertStore::new(&x509_ctx) {
+        Ok(store) => store,
+        Err(e) => {
+            x509_ctx.set_detailed_error(X509_V_ERR_APPLICATION_VERIFICATION, e, line!());
+            return 0;
+        }
+    };
+
+    // SAFETY: `store` holds a valid store pointer, and `cert_descriptors` is a valid
+    // sequence of certificates taken from the verified chain.
+    match unsafe {
+        upki_cert_store_check_verified_chain(
+            store.as_ptr(),
+            cert_descriptors.as_ptr().cast(),
+            cert_descriptors.len(),
+            ptr::null_mut(),
+        )
+    } {
+        upki_result::UPKI_CERT_STORE_ANCHORED => preverify_ok,
+        upki_result::UPKI_CERT_STORE_NOT_ANCHORED => {
+            x509_ctx.set_error(X509_V_ERR_CERT_UNTRUSTED);
+            0
+        }
+        e => {
+            x509_ctx.set_detailed_error(X509_V_ERR_APPLICATION_VERIFICATION, e, line!());
+            0
+        }
+    }
+}
+
 struct BorrowedX509StoreCtx<'a>(&'a mut X509_STORE_CTX);
 
 impl<'a> BorrowedX509StoreCtx<'a> {
@@ -223,11 +429,22 @@ impl<'a> BorrowedX509StoreCtx<'a> {
     }
 
     fn upki_config_from_ssl_ctx(&self) -> *const upki_config {
+        self.ssl_ctx_ex_data(*UPKI_SSL_CTX_CONFIG_INDEX)
+            .cast()
+    }
+
+    fn upki_cert_store_from_ssl_ctx(&self) -> *const upki_cert_store {
+        self.ssl_ctx_ex_data(*UPKI_SSL_CTX_CERT_STORE_INDEX)
+            .cast()
+    }
+
+    fn ssl_ctx_ex_data(&self, index: Option<c_int>) -> *const c_void {
         let ssl_ctx = self.ssl_ctx();
 
-        match (ssl_ctx.is_null(), *UPKI_SSL_CTX_CONFIG_INDEX) {
-            // SAFETY: `ssl_ctx` is non-NULL, the index only has a upki_config pointer inserted into it.
-            (false, Some(index)) => unsafe { SSL_CTX_get_ex_data(ssl_ctx, index).cast() },
+        match (ssl_ctx.is_null(), index) {
+            // SAFETY: `ssl_ctx` is non-NULL, and each index only has pointers of one type
+            // inserted into it.
+            (false, Some(index)) => unsafe { SSL_CTX_get_ex_data(ssl_ctx, index) },
             (_, _) => ptr::null(),
         }
     }
@@ -314,6 +531,46 @@ impl Drop for UpkiConfig {
     }
 }
 
+enum UpkiCertStore {
+    FromContext(*const upki_cert_store),
+    Owned(*mut upki_cert_store),
+}
+
+impl UpkiCertStore {
+    fn new(store_ctx: &BorrowedX509StoreCtx<'_>) -> Result<Self, upki_result> {
+        let ptr = store_ctx.upki_cert_store_from_ssl_ctx();
+        if !ptr.is_null() {
+            return Ok(Self::FromContext(ptr));
+        }
+
+        let config = UpkiConfig::new(store_ctx)?;
+        let mut ptr = ptr::null_mut();
+        // SAFETY: `config` holds a valid config pointer, and `ptr` is writable.
+        let rc = unsafe { upki_cert_store_open_from_config(config.as_ptr(), &mut ptr) };
+
+        match ptr.is_null() {
+            true => Err(rc),
+            false => Ok(Self::Owned(ptr)),
+        }
+    }
+
+    fn as_ptr(&self) -> *const upki_cert_store {
+        match self {
+            Self::FromContext(ptr) => *ptr,
+            Self::Owned(ptr) => *ptr,
+        }
+    }
+}
+
+impl Drop for UpkiCertStore {
+    fn drop(&mut self) {
+        if let Self::Owned(ptr) = self {
+            // SAFETY: `upki_cert_store_free` defined for a valid pointer or NULL.
+            unsafe { upki_cert_store_free(*ptr) }
+        }
+    }
+}
+
 /// A `upki_certificate_der` with borrow information intact.
 #[repr(transparent)]
 struct BorrowedUpkiCertificateDer<'a>(upki_certificate_der, PhantomData<&'a ()>);
@@ -353,21 +610,38 @@ fn x509_to_certificate_der(x509: &'_ X509) -> Option<CertificateDer<'static>> {
     Some(v.into())
 }
 
-static UPKI_SSL_CTX_CONFIG_INDEX: LazyLock<Option<c_int>> = LazyLock::new(|| unsafe {
+static UPKI_SSL_CTX_CONFIG_INDEX: LazyLock<Option<c_int>> =
+    LazyLock::new(|| ssl_ctx_ex_index(ssl_ctx_upki_config_free));
+
+static UPKI_SSL_CTX_CERT_STORE_INDEX: LazyLock<Option<c_int>> =
+    LazyLock::new(|| ssl_ctx_ex_index(ssl_ctx_upki_cert_store_free));
+
+fn ssl_ctx_ex_index(
+    free: unsafe extern "C" fn(
+        *mut c_void,
+        *mut c_void,
+        *mut CRYPTO_EX_DATA,
+        c_int,
+        c_long,
+        *mut c_void,
+    ),
+) -> Option<c_int> {
     // SAFETY: no documented safety conditions for this function.
-    let index = CRYPTO_get_ex_new_index(
-        CRYPTO_EX_INDEX_SSL_CTX,
-        0,
-        ptr::null_mut(),
-        None,
-        None,
-        Some(ssl_ctx_upki_config_free),
-    );
+    let index = unsafe {
+        CRYPTO_get_ex_new_index(
+            CRYPTO_EX_INDEX_SSL_CTX,
+            0,
+            ptr::null_mut(),
+            None,
+            None,
+            Some(free),
+        )
+    };
     match index {
         -1 => None,
         _ => Some(index),
     }
-});
+}
 
 /// Funnel `CRYPTO_EX_free` into calling `upki_config_free`.
 unsafe extern "C" fn ssl_ctx_upki_config_free(
@@ -381,6 +655,20 @@ unsafe extern "C" fn ssl_ctx_upki_config_free(
     // SAFETY: The previous value is either NULL or a valid config pointer.
     // This matches the precondition of `upki_config_free`.
     unsafe { upki_config_free(config.cast()) };
+}
+
+/// Funnel `CRYPTO_EX_free` into calling `upki_cert_store_free`.
+unsafe extern "C" fn ssl_ctx_upki_cert_store_free(
+    _parent: *mut c_void,
+    store: *mut c_void,
+    _ad: *mut CRYPTO_EX_DATA,
+    _idx: c_int,
+    _argl: c_long,
+    _argp: *mut c_void,
+) {
+    // SAFETY: The previous value is either NULL or a valid store pointer.
+    // This matches the precondition of `upki_cert_store_free`.
+    unsafe { upki_cert_store_free(store.cast()) };
 }
 
 static UPKI_ERR_LIB: LazyLock<c_int> = LazyLock::new(|| {

@@ -9,10 +9,21 @@ use openssl_sys::{
     X509_STORE_CTX_new, X509_STORE_CTX_set_error, X509_V_ERR_APPLICATION_VERIFICATION,
     stack_st_X509,
 };
-use upki::ffi::upki_config_new;
+use std::ffi::CString;
+
+use openssl_sys::{
+    SSL_free, SSL_get_ex_data_X509_STORE_CTX_idx, SSL_new, X509, X509_STORE_CTX_init,
+    X509_STORE_free, X509_STORE_new, X509_V_ERR_CERT_UNTRUSTED, X509_V_OK, X509_free,
+    X509_verify_cert, d2i_X509,
+};
+use upki::cert_store::CertificateStore;
+use upki::ffi::{upki_cert_store, upki_cert_store_open, upki_config_new};
 
 use super::upki_openssl_verify_callback;
-use crate::upki_openssl_set_config;
+use crate::{
+    upki_openssl_cert_store_verify_callback, upki_openssl_load_cert_store,
+    upki_openssl_set_cert_store, upki_openssl_set_config,
+};
 
 #[test]
 fn preverify_zero_returns_zero() {
@@ -131,6 +142,130 @@ fn set_config_is_freed() {
     }
 }
 
+#[test]
+fn load_cert_store_rejects_null() {
+    assert_eq!(
+        unsafe { upki_openssl_load_cert_store(ptr::null_mut(), ptr::null()) },
+        -1
+    );
+}
+
+#[test]
+fn cert_store_callback_preverify_zero_returns_zero() {
+    let ctx = StoreCtx::new();
+    assert_eq!(
+        unsafe { upki_openssl_cert_store_verify_callback(0, ctx.0) },
+        0
+    );
+    assert!(ctx.untouched_error());
+    assert_eq!(
+        unsafe { upki_openssl_cert_store_verify_callback(1, ptr::null_mut()) },
+        0
+    );
+}
+
+#[test]
+fn cert_store_callback_nonzero_depth_passes_through() {
+    let mut ctx = StoreCtx::new();
+    ctx.set_error_depth(1);
+    assert_eq!(
+        unsafe { upki_openssl_cert_store_verify_callback(1, ctx.0) },
+        1
+    );
+    assert!(ctx.untouched_error());
+}
+
+#[test]
+fn verifies_chain_anchored_in_cert_store() {
+    let (ok, error) = verify_leaf(&[ROOT], &[ROOT]);
+    assert_eq!(ok, 1);
+    assert_eq!(error, X509_V_OK);
+}
+
+#[test]
+fn rejects_chain_not_anchored_in_cert_store() {
+    // OpenSSL itself trusts the root, but the upki store constrains trust to another root.
+    let (ok, error) = verify_leaf(&[ROOT], &[OTHER_ROOT]);
+    assert_eq!(ok, 0);
+    assert_eq!(error, X509_V_ERR_CERT_UNTRUSTED);
+}
+
+/// Verify the leaf fixture with OpenSSL, loading `anchors` into the `X509_STORE`
+/// and using a upki store of `constraint` in the verify callback.
+fn verify_leaf(anchors: &[&[u8]], constraint: &[&[u8]]) -> (c_int, c_int) {
+    let anchors = UpkiCertStore::with(anchors);
+    let constraint = UpkiCertStore::with(constraint);
+    unsafe {
+        let store = X509_STORE_new();
+        assert_eq!(upki_openssl_load_cert_store(store, anchors.0), 1);
+
+        let ssl_ctx = SSL_CTX_new(TLS_client_method());
+        let ssl = SSL_new(ssl_ctx);
+        // The SSL_CTX takes ownership of the store pointer.
+        upki_openssl_set_cert_store(ssl_ctx, constraint.into_raw());
+
+        let leaf = parse(LEAF);
+        let intermediates = OPENSSL_sk_new_null() as *mut stack_st_X509;
+        let intermediate = parse(INTERMEDIATE);
+        OPENSSL_sk_push(intermediates as *mut OPENSSL_STACK, intermediate.cast());
+
+        let ctx = X509_STORE_CTX_new();
+        assert_eq!(X509_STORE_CTX_init(ctx, store, leaf, intermediates), 1);
+        X509_STORE_CTX_set_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx(), ssl.cast());
+        X509_STORE_CTX_set_verify_cb(ctx, Some(upki_openssl_cert_store_verify_callback));
+
+        let ok = X509_verify_cert(ctx);
+        let error = X509_STORE_CTX_get_error(ctx);
+
+        X509_STORE_CTX_free(ctx);
+        X509_free(intermediate);
+        OPENSSL_sk_free(intermediates as *mut OPENSSL_STACK);
+        X509_free(leaf);
+        SSL_free(ssl);
+        SSL_CTX_free(ssl_ctx);
+        X509_STORE_free(store);
+        (ok, error)
+    }
+}
+
+fn parse(der: &[u8]) -> *mut X509 {
+    let mut data = der.as_ptr();
+    let x509 = unsafe { d2i_X509(ptr::null_mut(), &mut data, der.len() as _) };
+    assert!(!x509.is_null());
+    x509
+}
+
+/// A upki certificate store opened through the C API.
+struct UpkiCertStore(*mut upki_cert_store);
+
+impl UpkiCertStore {
+    fn into_raw(self) -> *mut upki_cert_store {
+        let ptr = self.0;
+        mem::forget(self);
+        ptr
+    }
+
+    fn with(certificates: &[&[u8]]) -> Self {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut store = CertificateStore::new();
+        for certificate in certificates {
+            store.add(certificate).unwrap();
+        }
+        store.save(file.path()).unwrap();
+
+        let path = CString::new(file.path().to_str().unwrap()).unwrap();
+        let mut ptr = ptr::null_mut();
+        unsafe { upki_cert_store_open(path.as_ptr(), &mut ptr) };
+        assert!(!ptr.is_null());
+        Self(ptr)
+    }
+}
+
+const ROOT: &[u8] = include_bytes!("../../upki/tests/data/cert-store-chain/root.der");
+const OTHER_ROOT: &[u8] = include_bytes!("../../upki/tests/data/cert-store-chain/other-root.der");
+const INTERMEDIATE: &[u8] = include_bytes!("../../upki/tests/data/cert-store-chain/inter.der");
+const LEAF: &[u8] = include_bytes!("../../upki/tests/data/cert-store-chain/leaf.der");
+
 struct StoreCtx(*mut X509_STORE_CTX);
 
 impl StoreCtx {
@@ -197,6 +332,21 @@ impl Drop for Chain {
 const UNTOUCHED_ERROR: c_int = 12345678;
 
 unsafe extern "C" {
+    fn X509_STORE_CTX_set_ex_data(
+        ctx: *mut X509_STORE_CTX,
+        idx: c_int,
+        data: *mut core::ffi::c_void,
+    ) -> c_int;
+    fn X509_STORE_CTX_set_verify_cb(
+        ctx: *mut X509_STORE_CTX,
+        verify_cb: Option<unsafe extern "C" fn(c_int, *mut X509_STORE_CTX) -> c_int>,
+    );
     fn X509_STORE_CTX_set_error_depth(ctx: *mut X509_STORE_CTX, depth: c_int);
     fn X509_STORE_CTX_set0_verified_chain(ctx: *mut X509_STORE_CTX, chain: *mut stack_st_X509);
+}
+
+impl Drop for UpkiCertStore {
+    fn drop(&mut self) {
+        unsafe { upki::ffi::upki_cert_store_free(self.0) }
+    }
 }

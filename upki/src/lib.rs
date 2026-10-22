@@ -38,6 +38,10 @@ pub struct Config {
 
     /// Configuration for crlite-style revocation.
     pub revocation: RevocationConfig,
+
+    /// Location of the certificate store snapshot, if one is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cert_store: Option<PathBuf>,
 }
 
 impl Config {
@@ -80,7 +84,16 @@ impl Config {
                 }
             },
             revocation: RevocationConfig::default(),
+            cert_store: None,
         })
+    }
+
+    /// The configured certificate store snapshot path, from the `cert-store` key.
+    ///
+    /// There is deliberately no implicit default location yet; integrations
+    /// that discover the store automatically use this setting.
+    pub fn cert_store_path(&self) -> Option<&Path> {
+        self.cert_store.as_deref()
     }
 
     pub(crate) fn revocation_cache_dir(&self) -> PathBuf {

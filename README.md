@@ -99,8 +99,9 @@ the configured local revocation data and skip revoked certificates unless
 `--allow-revoked` is explicitly supplied. The commands require usable
 revocation data and issuer certificates in the supplied set.
 
-This store does not yet verify certificate chains or reproduce distro
-trust/distrust policy, and certificate presentation is not implemented.
+Experimental chain-verification interfaces are available for Rust, rustls,
+C, and OpenSSL. These do not reproduce distro trust/distrust policy, and
+certificate presentation is not implemented.
 See [CERTIFICATE-STORE.md](CERTIFICATE-STORE.md) and the
 [Debian/Ubuntu adapter specification](upki/src/cert_store/distro/README.md)
 for assumptions and limitations.

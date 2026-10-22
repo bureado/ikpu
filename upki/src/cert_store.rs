@@ -14,6 +14,9 @@ use crate::sha256;
 /// Distro-specific certificate-store adapters.
 pub mod distro;
 
+/// Verifying certificate chains against the store.
+pub mod verify;
+
 const MAGIC_V1: &[u8; 8] = b"upkics01";
 const MAGIC: &[u8; 8] = b"upkics02";
 const CHECKSUM_SIZE: usize = 32;

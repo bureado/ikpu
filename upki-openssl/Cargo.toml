@@ -17,6 +17,7 @@ upki = { version = "1", path = "../upki", features = ["capi"] }
 [dev-dependencies]
 cbindgen.workspace = true
 similar-asserts.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
