@@ -32,19 +32,33 @@ Options:
   -V, --version                    Print version
 ```
 
-For example, sync from the Ubuntu/Debian system bundle after its normal
-certificate update, then list or export certificates by SHA-256 fingerprint:
+For example, sync from the Debian/Ubuntu system bundle after its normal
+certificate update, then list or export certificates by SHA-256 fingerprint.
+`--distro` is optional when the current distribution can be autodetected:
 
 ```sh
 update-ca-certificates
-upki cert-store sync-ubuntu --store /var/lib/upki/certificates.store
+upki cert-store sync --store /var/lib/upki/certificates.store
+upki cert-store sync --distro ubuntu --store /var/lib/upki/certificates.store
 upki cert-store list --store /var/lib/upki/certificates.store
+upki cert-store list --show-source --store /var/lib/upki/certificates.store
 upki cert-store export --store /var/lib/upki/certificates.store --fingerprint <sha256> > certificate.der
 ```
 
-The store currently preserves certificate bytes only; it does not perform
+Administrator-managed certificates can be imported from PEM standard input:
+
+```sh
+upki cert-store import --store /var/lib/upki/certificates.store < administrator-cas.pem
+```
+
+Sync and import require the configured local revocation data, skip certificates
+known to be revoked, and accept `--allow-revoked` as an explicit override.
+Manual entries take precedence over distro entries and survive authoritative
+syncs. The Debian/Ubuntu strategy is documented in
+[its specification](../upki/src/cert_store/distro/README.md).
+
+The store preserves certificate bytes and provenance; it does not perform
 certificate-chain verification or reproduce distro trust/distrust attributes.
-See the root [certificate-store research and plan](../CERTIFICATE-STORE.md).
 
 ## License
 

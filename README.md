@@ -81,18 +81,29 @@ specification](https://c2sp.org/upki-revocation@v1.0.0).
 
 `upki::cert_store::CertificateStore` provides an experimental independent
 snapshot for storing, looking up, and exporting certificates by SHA-256
-fingerprint. The CLI can replace a snapshot from Ubuntu/Debian's generated
-system bundle after `update-ca-certificates`:
+fingerprint. On Debian and Ubuntu, run `sync` after `update-ca-certificates`;
+the distro is autodetected when possible:
 
 ```shell
-upki cert-store sync-ubuntu --store /var/lib/upki/certificates.store
+upki cert-store sync --store /var/lib/upki/certificates.store
+# Or specify the adapter:
+upki cert-store sync --distro ubuntu --store /var/lib/upki/certificates.store
 upki cert-store list --store /var/lib/upki/certificates.store
 upki cert-store export --store /var/lib/upki/certificates.store --fingerprint <sha256>
 ```
 
-This initial feature does not yet verify certificate chains or model
-distribution trust/distrust policy. See [CERTIFICATE-STORE.md](CERTIFICATE-STORE.md)
-for the research, current limitations, and implementation roadmap.
+Administrator certificates can be imported from PEM on standard input with
+`upki cert-store import --store ...`; they take precedence over distro-managed
+entries and survive later syncs. Sync and import check certificates against
+the configured local revocation data and skip revoked certificates unless
+`--allow-revoked` is explicitly supplied. The commands require usable
+revocation data and issuer certificates in the supplied set.
+
+This store does not yet verify certificate chains or reproduce distro
+trust/distrust policy, and certificate presentation is not implemented.
+See [CERTIFICATE-STORE.md](CERTIFICATE-STORE.md) and the
+[Debian/Ubuntu adapter specification](upki/src/cert_store/distro/README.md)
+for assumptions and limitations.
 
 # Packaging
 

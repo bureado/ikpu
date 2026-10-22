@@ -31,6 +31,21 @@ fn version() {
 }
 
 #[test]
+fn cert_store_sync_accepts_a_distro_option() {
+    let output = upki()
+        .arg("cert-store")
+        .arg("sync")
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("--distro"));
+    assert!(stdout.contains("--allow-revoked"));
+    assert!(!stdout.contains("sync-ubuntu"));
+}
+
+#[test]
 fn config_unknown_fields() {
     let _filters = apply_common_filters();
     assert_cmd_snapshot!(

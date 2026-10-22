@@ -43,41 +43,58 @@ package upgrade hook behavior.
 The `upki::cert_store::CertificateStore` API stores DER certificates by
 SHA-256 fingerprint, keeps the complete index in memory, and supports lookup,
 iteration, addition, removal, and an atomic snapshot write. Its versioned
-binary file contains a count, fingerprint/length/data records, and a trailing
-SHA-256 checksum. The checksum and per-entry fingerprints detect accidental
-corruption and malformed snapshots; they are **not** signatures and do not
-authenticate the file against an attacker who can rewrite it. File ownership
-and permissions remain part of the system security boundary.
+binary file contains a count, fingerprint/provenance/length/data records, and a
+trailing SHA-256 checksum. Version 1 snapshots had no provenance field and are
+treated as distro-managed during migration. The checksum and per-entry
+fingerprints detect accidental corruption and malformed snapshots; they are
+**not** signatures and do not authenticate the file against an attacker who can
+rewrite it. File ownership and permissions remain part of the system security
+boundary.
 
-`upki cert-store sync-ubuntu` replaces the snapshot from
-`/etc/ssl/certs/ca-certificates.crt` (or an explicit `--bundle` path).
-`list` prints fingerprints and `export` writes the matching DER certificate to
-stdout. A package integration can invoke the sync command after
-`update-ca-certificates`; for example:
+The shared Debian/Ubuntu adapter is selected with `--distro debian` or
+`--distro ubuntu`; when omitted, `whatadistro` reads `/etc/os-release` and
+selects a supported adapter when possible. `sync` reads
+`/etc/ssl/certs/ca-certificates.crt` by default (or an explicit `--bundle`
+path). A package integration can invoke it after `update-ca-certificates`; for
+example:
 
 ```sh
 update-ca-certificates
-upki cert-store sync-ubuntu --store /var/lib/upki/certificates.store
+upki cert-store sync --distro ubuntu --store /var/lib/upki/certificates.store
 ```
 
-This first slice deliberately does not yet build or validate certificate
-chains against the trust store, validate the X.509 structure of each DER value,
-retain per-certificate provenance/trust attributes, invoke distro commands
-itself, or install package hooks. The Ubuntu adapter ingests PEM certificate
-blocks as opaque DER records and should not be mistaken for a complete
-trust-policy model.
+The Debian/Ubuntu ingestion strategy reloads the generated bundle as the
+authoritative distro snapshot. It hashes every certificate, avoids copying
+known fingerprints again, and removes distro-managed fingerprints absent from
+the new snapshot. `upki cert-store import --store ... < file.pem` records an
+administrator-managed certificate; manual records take precedence over a
+distro record with the same fingerprint and are not removed by sync. Use
+`list --show-source` to inspect provenance.
+
+Before sync or import, every certificate is checked against the configured
+local revocation data. Certificates known to be revoked are skipped; the
+explicit `--allow-revoked` flag permits them. The revocation data must be
+available, and each certificate's issuer must be present in the supplied
+certificate set. This checks revocation only; it does not validate a chain or
+trust decision.
+
+The distro adapter and presentation strategy interfaces live in
+`upki::cert_store::distro`. Certificate presentation is currently an explicit
+unsupported stub. The Debian/Ubuntu assumptions, package-hook contract,
+system paths, and OpenSSL compatibility notes are specified in
+[`upki/src/cert_store/distro/README.md`](upki/src/cert_store/distro/README.md).
+The CLI does not invoke `update-ca-certificates` itself or install package
+hooks.
 
 ## Proposed roadmap
 
 1. **Harden the core model.** Decide whether records represent certificates
    only or trust decisions as well; define CA/basic-constraints validation,
-   duplicate and distrust semantics, source/provenance metadata, version
-   migration, and limits appropriate to real distribution stores.
-2. **Build a distro adapter interface.** Model adapters as explicit snapshot
-   discovery/import providers, initially with Ubuntu/Debian bundle ingestion.
-   Add fixture-based tests for hook invocation, additions, removals, malformed
-   input, and package upgrades. Add a `p11-kit` adapter for Fedora/RHEL rather
-   than assuming identical semantics. Evaluate Alpine's bundle-only case.
+   duplicate and distrust semantics, and limits appropriate to real
+   distribution stores.
+2. **Expand distro adapters.** Add fixture-based package-hook and upgrade
+   coverage for Debian/Ubuntu, then add a `p11-kit` adapter for Fedora/RHEL
+   rather than assuming identical semantics. Evaluate Alpine's bundle-only case.
 3. **Provide useful queries.** Add a CLI verification operation that validates
    a presented chain and name against the loaded roots, plus certificate
    lookup/export by stable fingerprint. Define policy for missing, malformed,

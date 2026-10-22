@@ -123,3 +123,38 @@ impl From<io::Error> for Error {
         Self::Io(error)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debian_ubuntu_reads_a_generated_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = directory
+            .path()
+            .join("ca-certificates.crt");
+        std::fs::write(
+            &bundle,
+            b"-----BEGIN CERTIFICATE-----\nY2VydA==\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        let strategy = DebianUbuntu::new(Some(bundle));
+        let certificates = strategy.load().unwrap();
+        assert_eq!(certificates.len(), 1);
+        assert_eq!(certificates[0].as_ref(), b"cert");
+    }
+
+    #[test]
+    fn debian_ubuntu_rejects_an_empty_bundle() {
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = directory
+            .path()
+            .join("ca-certificates.crt");
+        std::fs::write(&bundle, b"").unwrap();
+
+        let strategy = DebianUbuntu::new(Some(bundle));
+        assert!(matches!(strategy.load(), Err(Error::EmptyBundle)));
+    }
+}

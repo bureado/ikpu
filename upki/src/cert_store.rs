@@ -74,9 +74,12 @@ struct Certificate {
     source: CertificateSource,
 }
 
+/// Provenance of a stored certificate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CertificateSource {
+pub enum CertificateSource {
+    /// Imported manually by an administrator; retained across distro syncs.
     Manual,
+    /// Imported from the authoritative distro certificate source.
     Distro,
 }
 
@@ -98,10 +101,11 @@ impl CertificateStore {
         Self::decode(&bytes)
     }
 
-    /// Add a DER-encoded certificate to the store.
+    /// Add a DER-encoded administrator-managed certificate to the store.
     ///
-    /// Adding the same certificate more than once is harmless. The returned
-    /// fingerprint can be used to retrieve or remove the certificate.
+    /// Adding the same certificate more than once is harmless. If the
+    /// certificate was distro-managed, this marks it manual so future syncs
+    /// retain it. The returned fingerprint can be used to retrieve or remove it.
     pub fn add(&mut self, der: &[u8]) -> Result<Fingerprint, Error> {
         let fingerprint = Fingerprint(sha256::Digest::from(&[der][..]).0);
         if let Some(existing) = self.certificates.get_mut(&fingerprint) {
@@ -167,6 +171,13 @@ impl CertificateStore {
         self.certificates
             .get(fingerprint)
             .map(|certificate| certificate.der.as_slice())
+    }
+
+    /// Return the provenance of the certificate identified by `fingerprint`.
+    pub fn source(&self, fingerprint: &Fingerprint) -> Option<CertificateSource> {
+        self.certificates
+            .get(fingerprint)
+            .map(|certificate| certificate.source)
     }
 
     /// Iterate over certificates in fingerprint order.
@@ -253,11 +264,6 @@ impl CertificateStore {
             Some(magic) if magic == MAGIC_V1 => 1,
             _ => return Err(Error::InvalidStore),
         };
-        if bytes.get(..MAGIC.len()) != Some(MAGIC.as_slice())
-            && bytes.get(..MAGIC.len()) != Some(MAGIC_V1.as_slice())
-        {
-            return Err(Error::InvalidStore);
-        }
         let checksum = sha256::Digest::from(&[&bytes[..payload_len]][..]);
         if checksum.as_ref() != &bytes[payload_len..] {
             return Err(Error::ChecksumMismatch);
@@ -279,7 +285,7 @@ impl CertificateStore {
                     .map_err(|_| Error::InvalidStore)?,
             );
             let source = if version == 1 {
-                CertificateSource::Manual
+                CertificateSource::Distro
             } else {
                 match take(bytes, &mut cursor, 1, payload_len)?[0] {
                     0 => CertificateSource::Manual,
@@ -454,7 +460,7 @@ mod tests {
             .sync_distro([b"shared certificate".as_slice()])
             .unwrap();
         store
-            .sync_distro(std::iter::empty::<&[u8]>())
+            .sync_distro(core::iter::empty::<&[u8]>())
             .unwrap();
         assert!(store.get(&manual_precedence).is_some());
     }
@@ -471,12 +477,51 @@ mod tests {
         let loaded = CertificateStore::decode(&store.encode().unwrap()).unwrap();
         assert_eq!(loaded.get(&manual), Some(b"manual".as_slice()));
         assert_eq!(loaded.get(&distro), Some(b"distro".as_slice()));
+        assert_eq!(loaded.source(&manual), Some(CertificateSource::Manual));
+        assert_eq!(loaded.source(&distro), Some(CertificateSource::Distro));
         let mut loaded = loaded;
         loaded
-            .sync_distro(std::iter::empty::<&[u8]>())
+            .sync_distro(core::iter::empty::<&[u8]>())
             .unwrap();
         assert!(loaded.get(&manual).is_some());
         assert!(loaded.get(&distro).is_none());
+    }
+
+    #[test]
+    fn adding_a_distro_certificate_manually_gives_it_precedence() {
+        let mut store = CertificateStore::new();
+        store
+            .sync_distro([b"shared".as_slice()])
+            .unwrap();
+        let fingerprint = store.add(b"shared").unwrap();
+        assert_eq!(store.source(&fingerprint), Some(CertificateSource::Manual));
+
+        store
+            .sync_distro(core::iter::empty::<&[u8]>())
+            .unwrap();
+        assert!(store.get(&fingerprint).is_some());
+    }
+
+    #[test]
+    fn reads_v1_snapshots_as_distro_certificates() {
+        let der: &[u8] = b"legacy certificate";
+        let fingerprint = Fingerprint(sha256::Digest::from(&[der][..]).0);
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC_V1);
+        bytes.extend_from_slice(&1u32.to_be_bytes());
+        bytes.extend_from_slice(fingerprint.as_bytes());
+        bytes.extend_from_slice(&(der.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(der);
+        let checksum = sha256::Digest::from(&[bytes.as_slice()][..]);
+        bytes.extend_from_slice(&checksum.0);
+
+        let mut loaded = CertificateStore::decode(&bytes).unwrap();
+        assert_eq!(loaded.get(&fingerprint), Some(der));
+        assert_eq!(loaded.source(&fingerprint), Some(CertificateSource::Distro));
+        loaded
+            .sync_distro(core::iter::empty::<&[u8]>())
+            .unwrap();
+        assert!(loaded.get(&fingerprint).is_none());
     }
 
     #[test]

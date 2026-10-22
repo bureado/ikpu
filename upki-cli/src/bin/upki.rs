@@ -1,5 +1,6 @@
 //! upki command-line entrypoint.
 
+use core::fmt;
 use std::io::{BufReader, Write, stdin};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -101,7 +102,10 @@ fn run_cert_store(
             distro,
             allow_revoked,
         } => {
-            let distro = distro.unwrap_or(detect_distro()?);
+            let distro = match distro {
+                Some(distro) => distro,
+                None => detect_distro()?,
+            };
             let strategy = DebianUbuntu::new(bundle);
             let certificates = strategy.load()?;
             let revocation_store = revocation_store(config_file)?;
@@ -110,9 +114,9 @@ fn run_cert_store(
             strategy.reconcile(&mut certificate_store, &certificates)?;
             certificate_store.save(&store)?;
             eprintln!(
-                "Synchronized {} {} certificates to {}",
+                "Synchronized {} snapshot with {} certificates to {}",
                 distro,
-                certificate_store.len(),
+                certificates.len(),
                 store.display()
             );
         }
@@ -140,10 +144,17 @@ fn run_cert_store(
                 store.display()
             );
         }
-        CertStoreCommand::List { store } => {
+        CertStoreCommand::List { store, show_source } => {
             let certificate_store = CertificateStore::open(&store)?;
             for (fingerprint, _) in certificate_store.iter() {
-                println!("{}", fingerprint.to_hex());
+                if show_source {
+                    let source = certificate_store
+                        .source(&fingerprint)
+                        .expect("iterated certificates have a source");
+                    println!("{} {}", fingerprint.to_hex(), source_name(source));
+                } else {
+                    println!("{}", fingerprint.to_hex());
+                }
             }
         }
         CertStoreCommand::Export { store, fingerprint } => {
@@ -162,12 +173,23 @@ fn run_cert_store(
 fn detect_distro() -> Result<CertStoreDistro, Report> {
     let distro = whatadistro::Distro::current()
         .ok_or_else(|| eyre::eyre!("cannot detect distribution; pass --distro explicitly"))?;
-    match distro.id().to_string().as_str() {
+    distro_from_id(&distro.id().to_string())
+}
+
+fn distro_from_id(id: &str) -> Result<CertStoreDistro, Report> {
+    match id {
         "debian" => Ok(CertStoreDistro::Debian),
         "ubuntu" => Ok(CertStoreDistro::Ubuntu),
         detected => bail!(
             "automatic certificate-store sync is unsupported for {detected}; pass --distro debian or ubuntu"
         ),
+    }
+}
+
+fn source_name(source: upki::cert_store::CertificateSource) -> &'static str {
+    match source {
+        upki::cert_store::CertificateSource::Manual => "manual",
+        upki::cert_store::CertificateSource::Distro => "distro",
     }
 }
 
@@ -307,6 +329,9 @@ enum CertStoreCommand {
         /// Store snapshot file.
         #[arg(long)]
         store: PathBuf,
+        /// Include whether each certificate is manual or distro-managed.
+        #[arg(long)]
+        show_source: bool,
     },
 
     /// Write one certificate's DER bytes to standard output.
@@ -326,8 +351,8 @@ enum CertStoreDistro {
     Ubuntu,
 }
 
-impl std::fmt::Display for CertStoreDistro {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for CertStoreDistro {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Debian => f.write_str("Debian"),
             Self::Ubuntu => f.write_str("Ubuntu"),
@@ -355,4 +380,22 @@ enum Revocation {
     /// 1 means an error prevented the revocation check, and
     /// 2 means the revocation check completed and the certificate is revoked.
     Check,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_supported_distribution_ids() {
+        assert!(matches!(
+            distro_from_id("ubuntu").unwrap(),
+            CertStoreDistro::Ubuntu
+        ));
+        assert!(matches!(
+            distro_from_id("debian").unwrap(),
+            CertStoreDistro::Debian
+        ));
+        assert!(distro_from_id("fedora").is_err());
+    }
 }
