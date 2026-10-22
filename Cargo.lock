@@ -2838,6 +2838,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "upki",
+ "whatadistro",
 ]
 
 [[package]]
@@ -3055,6 +3056,12 @@ checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "whatadistro"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c97ebad4f59809511083f2161587445631bff21bb78d9e046b9ca5b2d05d913"
 
 [[package]]
 name = "winapi"
