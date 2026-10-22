@@ -88,24 +88,30 @@ It rejects `--bundle` and does not replace any system trust outputs.
 See the [Fedora/RHEL specification](../upki/src/cert_store/distro/FEDORA.md)
 for assumptions, package integration, and the unimplemented presentation layer.
 
-The store preserves certificate bytes and provenance; it does not perform
+Ingestion preserves certificate bytes and provenance; it does not perform
 certificate-chain verification or reproduce distro trust/distrust attributes.
-Verify a TLS server certificate against the managed store by piping a PEM chain,
+Verify a certificate's chain against the managed store by piping a PEM chain,
 with the leaf first and any intermediates after it:
 
 ```sh
 cat server-chain.pem | upki cert-store verify \
-  --store /var/lib/upki/certificates.store --server-name example.com
+  --store /var/lib/upki/certificates.store
 # Or obtain the chain using curl:
 curl -sS -o /dev/null -w '%{certs}' https://example.com | \
-  upki cert-store verify --store /var/lib/upki/certificates.store --server-name example.com
+  upki cert-store verify
 ```
 
-Verification checks the chain's signatures, validity dates, TLS server-auth
-usage, and the expected DNS name or IP address at the current time. Only the
+Verification checks the chain's signatures, validity dates, CA/path constraints,
+and path to a stored trust anchor at the current time. It is not TLS-specific:
+it does **not** check DNS/IP names or require a particular extended key usage
+(EKU). Malformed EKU extensions are still rejected. `--server-name` is no longer
+accepted. TLS stacks and other applications must enforce their own identity,
+purpose, content-signature, and protocol policies; `Verified` alone does not
+establish that a certificate is suitable for an application. Rustls/OpenSSL
+integrations retain their normal purpose and name checks. Only the
 snapshot supplies trust anchors; certificates on stdin do not establish trust.
 It prints `Verified` and exits 0 on success, or reports an error on stderr and
-exits 1. `--server-name` is required. Missing intermediates
+exits 1. No command-line options are required. Missing intermediates
 are not downloaded.
 
 Verification also checks the leaf against local revocation data using the

@@ -4,14 +4,11 @@ use core::fmt;
 use std::io::{BufReader, Write, stdin};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use eyre::{Context, Report, bail};
-use rustls::RootCertStore;
-use rustls::client::danger::ServerCertVerifier;
 use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls_pki_types::{CertificateDer, UnixTime};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -98,8 +95,7 @@ fn run_cert_store(
     command: CertStoreCommand,
     config_file: Option<PathBuf>,
 ) -> Result<ExitCode, Report> {
-    let config_path =
-        ConfigPath::new(config_file.clone()).wrap_err("cannot find configuration path")?;
+    let config_path = ConfigPath::new(config_file).wrap_err("cannot find configuration path")?;
     let config = Config::from_file_or_user_default(&config_path)?;
     match command {
         CertStoreCommand::Sync {
@@ -176,49 +172,69 @@ fn run_cert_store(
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(der)?;
         }
-        CertStoreCommand::Verify { store, server_name } => {
+        CertStoreCommand::Verify { store } => {
             let store = store.resolve(&config)?;
-            let server_name = ServerName::try_from(server_name).wrap_err("invalid server name")?;
             let certificate_store =
                 CertificateStore::open(&store).wrap_err("cannot open certificate store")?;
-            let mut roots = RootCertStore::empty();
             for (fingerprint, der) in certificate_store.iter() {
-                roots
-                    .add(CertificateDer::from(der))
+                webpki::anchor_from_trusted_cert(&CertificateDer::from(der))
                     .wrap_err_with(|| format!("invalid trust anchor: {}", fingerprint.to_hex()))?;
             }
-            if roots.is_empty() {
+            if certificate_store.is_empty() {
                 bail!("cannot build certificate verifier: no trust anchors");
             }
-            let verifier = rustls_upki::ServerVerifier::new(
-                rustls_upki::Policy {
-                    missing_data: rustls_upki::Outcome::Allowed,
-                    ..Default::default()
-                },
-                config_file,
-                Arc::new(roots),
-                Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
-            )
-            .wrap_err("cannot build certificate verifier")?;
             let certificates = CertificateDer::pem_reader_iter(&mut BufReader::new(stdin()))
                 .collect::<Result<Vec<_>, _>>()
                 .wrap_err("cannot parse certificates from stdin")?;
             let (end_entity, intermediates) = certificates
                 .split_first()
                 .ok_or_else(|| eyre::eyre!("standard input contains no certificates"))?;
-            verifier
-                .verify_server_cert(
+            let verified = certificate_store
+                .verify_chain(
                     end_entity,
                     intermediates,
-                    &server_name,
-                    &[],
+                    &AnyPurpose,
+                    rustls::crypto::aws_lc_rs::default_provider()
+                        .signature_verification_algorithms
+                        .all,
                     UnixTime::now(),
                 )
                 .wrap_err("certificate verification failed")?;
+            let anchor = certificate_store
+                .get(&verified.anchor())
+                .expect("verified anchor belongs to the store");
+            let mut verified_certificates = vec![end_entity.clone()];
+            verified_certificates.extend_from_slice(verified.intermediates());
+            verified_certificates.push(CertificateDer::from(anchor));
+            let input = RevocationCheckInput::from_certificates(&verified_certificates)
+                .wrap_err("cannot prepare certificate revocation check")?;
+            if !input.sct_timestamps.is_empty() {
+                match Store::from_config(&config).check(&input) {
+                    Ok(RevocationStatus::CertainlyRevoked) => {
+                        bail!("certificate verification failed: Revoked");
+                    }
+                    Ok(_) | Err(upki::revocation::Error::NoData { .. }) => {}
+                    Err(error) => {
+                        return Err(error).wrap_err("cannot check certificate revocation");
+                    }
+                }
+            }
             println!("Verified");
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+struct AnyPurpose;
+
+impl webpki::ExtendedKeyUsageValidator for AnyPurpose {
+    fn validate(&self, iter: webpki::KeyPurposeIdIter<'_, '_>) -> Result<(), webpki::Error> {
+        // Purpose belongs to the consumer, but malformed EKU DER is still an error.
+        for purpose in iter {
+            purpose?;
+        }
+        Ok(())
+    }
 }
 
 fn detect_distro() -> Result<CertStoreDistro, Report> {
@@ -360,20 +376,18 @@ enum Command {
 enum CertStoreCommand {
     /// Verify a PEM certificate chain from standard input against the store.
     ///
-    /// The first certificate must be the TLS server's end-entity certificate,
+    /// The first certificate must be the end-entity certificate,
     /// followed by any intermediates. Only certificates in the store are trusted;
     /// roots supplied on stdin do not establish trust.
     ///
-    /// Checks signatures, validity dates, server-auth usage, and the server name.
+    /// Checks signatures, validity dates, and a path to a stored trust anchor.
+    /// Does not check names or application purpose (EKU); consumers must do so.
     /// Checks leaf revocation when local data is available. Missing data or
     /// coverage is allowed. Does not fetch missing intermediates or revocation data.
     /// Prints "Verified" and exits 0 on success; errors exit 1.
     Verify {
         #[command(flatten)]
         store: StoreOptions,
-        /// Expected DNS name or IP address (not a URL).
-        #[arg(long)]
-        server_name: String,
     },
 
     /// Import the generated system certificate source into upki's snapshot.

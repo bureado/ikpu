@@ -18,7 +18,7 @@ clap.workspace = true
 eyre.workspace = true
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-pki-types.workspace = true
-rustls-upki = { version = "1", path = "../rustls-upki" }
+rustls-webpki.workspace = true
 upki = { version = "1", path = "../upki" }
 tokio.workspace = true
 toml.workspace = true

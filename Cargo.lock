@@ -2860,7 +2860,7 @@ dependencies = [
  "regex",
  "rustls",
  "rustls-pki-types",
- "rustls-upki",
+ "rustls-webpki 0.104.0-alpha.8",
  "tempfile",
  "tiny_http",
  "tokio",

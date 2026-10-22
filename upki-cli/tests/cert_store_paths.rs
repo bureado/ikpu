@@ -119,10 +119,7 @@ fn every_operation_uses_the_same_store_precedence() {
             .stdout,
             root.der().as_ref()
         );
-        assert_success(run(
-            command("verify").args(["--server-name", "example.com"]),
-            &leaf.pem(),
-        ));
+        assert_success(run(&mut command("verify"), &leaf.pem()));
         assert_success(run(
             command("sync")
                 .args(["--distro", "debian", "--bundle"])
