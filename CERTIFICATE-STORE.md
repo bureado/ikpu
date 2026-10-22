@@ -90,6 +90,14 @@ system paths, and OpenSSL compatibility notes are specified in
 The CLI does not invoke `update-ca-certificates` itself or install package
 hooks.
 
+`sync` is ingestion, not deployment: it imports the distro source into upki's
+independent snapshot and reconciles only that snapshot's distro-managed records.
+It never replaces system trust files or redirects consumers. A future
+`upki cert-store serve` subcommand should own replacement/presentation, with
+explicit destinations, permissions, atomic updates, rollback, and consumer
+reload semantics. This is separate future work, not a currently available
+command.
+
 ## Experimental verification interfaces
 
 The feature prototype separates selecting anchors from verifying a particular

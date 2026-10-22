@@ -364,9 +364,11 @@ enum CertStoreCommand {
         server_name: String,
     },
 
-    /// Replace distro-managed entries from the generated system certificate source.
+    /// Import the generated system certificate source into upki's snapshot.
     ///
     /// Run after the distro updates its trust store, such as from a package hook.
+    /// Reconciles distro-managed entries only inside upki's snapshot; it does not
+    /// replace system trust files or redirect applications to this store.
     Sync {
         /// Destination snapshot file.
         #[arg(long)]

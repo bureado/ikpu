@@ -36,6 +36,11 @@ For example, sync from the Debian/Ubuntu system bundle after its normal
 certificate update, then list or export certificates by SHA-256 fingerprint.
 `--distro` is optional when the current distribution can be autodetected:
 
+`sync` imports into upki's independent snapshot, reconciling its distro-managed
+entries. It does not replace distro trust files or change application trust
+configuration. A future `cert-store serve` command could present the snapshot
+as a replacement trust source; no such command is implemented yet.
+
 ```sh
 update-ca-certificates
 upki cert-store sync --store /var/lib/upki/certificates.store
