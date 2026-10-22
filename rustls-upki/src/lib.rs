@@ -13,11 +13,54 @@ use rustls::{
     CertRevocationListError, CertificateError, DigitallySignedStruct, DistinguishedName,
     ExtendedKeyPurpose, RootCertStore, SignatureScheme, SupportedCipherSuite,
 };
+use upki::cert_store::CertificateStore;
 use upki::revocation::{
     self, CertSerial, CtTimestamp, IssuerSpkiHash, RevocationCheckInput, RevocationStatus, Store,
 };
 use upki::{self, Config, ConfigPath};
 use webpki::{EndEntityCert, ExtendedKeyUsage, InvalidNameContext, PathBuilder, VerifiedPath};
+
+/// Build a rustls [`RootCertStore`] from a upki [`CertificateStore`].
+///
+/// The result can be used anywhere rustls accepts roots: with
+/// [`rustls::client::WebPkiServerVerifier`], [`rustls::server::WebPkiClientVerifier`],
+/// or this crate's [`ServerVerifier`] to combine store trust with revocation checking.
+/// rustls then verifies signatures, validity, purpose, and names as usual.
+///
+/// Certificates that cannot be parsed as trust anchors are skipped. Every
+/// stored certificate is treated as an anchor for every purpose.
+pub fn root_store_from_cert_store(store: &CertificateStore) -> RootCertStore {
+    let mut roots = RootCertStore::empty();
+    roots.add_parsable_certificates(
+        store
+            .iter()
+            .map(|(_, der)| CertificateDer::from(der.to_vec())),
+    );
+    roots
+}
+
+/// Build a rustls [`RootCertStore`] from the certificate store named by the
+/// `cert-store` key of the upki configuration file.
+///
+/// `config_path` is handled as in [`ServerVerifier::new`]. This fails if no
+/// store is configured, the store cannot be read, or it has no usable anchors.
+pub fn load_root_store(config_path: Option<PathBuf>) -> Result<RootCertStore, rustls::Error> {
+    let config = ConfigPath::new(config_path)
+        .and_then(|path| Config::from_file_or_user_default(&path))
+        .map_err(|report| rustls::Error::General(report.to_string()))?;
+    let path = config
+        .cert_store_path()
+        .ok_or_else(|| rustls::Error::General("no upki cert-store is configured".into()))?;
+    let store = CertificateStore::open(path).map_err(|e| rustls::Error::General(e.to_string()))?;
+
+    let roots = root_store_from_cert_store(&store);
+    match roots.is_empty() {
+        true => Err(rustls::Error::General(
+            "upki cert-store has no usable trust anchors".into(),
+        )),
+        false => Ok(roots),
+    }
+}
 
 /// A [`ServerCertVerifier`] that uses upki to check revocation status of server certificates.
 pub struct ServerVerifier {
@@ -377,5 +420,58 @@ pub(crate) fn ekp_for_values(values: impl Iterator<Item = usize>) -> ExtendedKey
         ExtendedKeyUsage::CLIENT_AUTH_REPR => ExtendedKeyPurpose::ClientAuth,
         ExtendedKeyUsage::SERVER_AUTH_REPR => ExtendedKeyPurpose::ServerAuth,
         _ => ExtendedKeyPurpose::Other(values),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
+
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::crypto::aws_lc_rs::default_provider;
+
+    use super::*;
+
+    const ROOT: &[u8] = include_bytes!("../../upki/tests/data/cert-store-chain/root.der");
+    const OTHER_ROOT: &[u8] =
+        include_bytes!("../../upki/tests/data/cert-store-chain/other-root.der");
+    const INTERMEDIATE: &[u8] = include_bytes!("../../upki/tests/data/cert-store-chain/inter.der");
+    const LEAF: &[u8] = include_bytes!("../../upki/tests/data/cert-store-chain/leaf.der");
+    // 2030-01-01T00:00:00Z, inside the fixtures' validity period.
+    const NOW: UnixTime = UnixTime::since_unix_epoch(Duration::from_secs(1_893_456_000));
+
+    fn verify(store: &CertificateStore) -> Result<ServerCertVerified, rustls::Error> {
+        let verifier = WebPkiServerVerifier::builder_with_provider(
+            Arc::new(root_store_from_cert_store(store)),
+            Arc::new(default_provider()),
+        )
+        .build()
+        .unwrap();
+        verifier.verify_server_cert(
+            &CertificateDer::from(LEAF),
+            &[CertificateDer::from(INTERMEDIATE)],
+            &ServerName::try_from("localhost").unwrap(),
+            &[],
+            NOW,
+        )
+    }
+
+    #[test]
+    fn cert_store_roots_verify_server_chain() {
+        let mut store = CertificateStore::new();
+        store.add(ROOT).unwrap();
+        store.add(b"not a certificate").unwrap();
+        assert_eq!(root_store_from_cert_store(&store).len(), 1);
+        verify(&store).unwrap();
+    }
+
+    #[test]
+    fn cert_store_roots_reject_unrelated_chain() {
+        let mut store = CertificateStore::new();
+        store.add(OTHER_ROOT).unwrap();
+        assert_eq!(
+            verify(&store).unwrap_err(),
+            rustls::Error::InvalidCertificate(CertificateError::UnknownIssuer)
+        );
     }
 }

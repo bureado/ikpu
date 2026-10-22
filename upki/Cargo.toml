@@ -33,6 +33,7 @@ tracing.workspace = true
 cbindgen.workspace = true
 clubcard.workspace = true
 clubcard-crlite = { workspace = true, features = ["builder"] }
+rustls = { workspace = true, features = ["aws-lc-rs"] }
 similar-asserts.workspace = true
 
 [lints]

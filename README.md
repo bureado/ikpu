@@ -101,6 +101,9 @@ the configured local revocation data and skip revoked certificates unless
 `--allow-revoked` is explicitly supplied. The commands require usable
 revocation data and issuer certificates in the supplied set.
 
+Experimental chain-verification interfaces are available for Rust, rustls,
+C, and OpenSSL. These do not reproduce distro trust/distrust policy, and
+certificate presentation is not implemented.
 To verify a TLS server certificate against the managed snapshot, pipe a PEM
 chain (leaf first, then intermediates) and specify the expected DNS name or IP:
 

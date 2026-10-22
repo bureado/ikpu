@@ -2834,6 +2834,7 @@ dependencies = [
  "hex",
  "jiff",
  "reqwest",
+ "rustls",
  "rustls-pki-types",
  "rustls-webpki 0.104.0-alpha.8",
  "serde",
@@ -2899,6 +2900,7 @@ dependencies = [
  "openssl-sys",
  "rustls-pki-types",
  "similar-asserts",
+ "tempfile",
  "upki",
 ]
 
