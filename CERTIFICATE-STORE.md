@@ -169,6 +169,14 @@ only a server-auth anchor projection; it does not retain arbitrary p11-kit
 trust or distrust objects. Presentation remains explicitly unsupported.
 ## Verifying a presented certificate
 
+All `cert-store` subcommands accept an optional `--store`. Resolution is
+`--store` > `UPKI_CERT_STORE` > config `cert-store` > `cache-dir/certificates.store`.
+The fallback shares the configured/default cache directory with revocation
+data. Sync/import create missing parent directories; reads require an existing
+snapshot. Empty override paths are rejected. This CLI fallback does not
+implicitly enable certificate-store trust in library consumers, which remain
+opt-in through the configuration key.
+
 `upki cert-store verify` reads a PEM chain from standard input, with the leaf
 first and any intermediates following it:
 

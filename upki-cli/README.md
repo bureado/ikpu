@@ -11,6 +11,18 @@ certificates against it.
 
 ## Usage
 
+`--store` is optional for **every** `cert-store` operation. The snapshot path is
+selected in this order: `--store`, `UPKI_CERT_STORE`, the configuration file's
+`cert-store` key, then `certificates.store` in the configured/default `cache-dir`
+(alongside the revocation cache). Sync and import create missing parent
+directories; read operations never create an empty store. Empty explicit or
+environment paths are errors. For example:
+
+```sh
+export UPKI_CERT_STORE=/var/lib/upki/certificates.store
+upki cert-store list
+```
+
 ```
 Platform-independent browser-grade certificate infrastructure
 
@@ -93,7 +105,7 @@ Verification checks the chain's signatures, validity dates, TLS server-auth
 usage, and the expected DNS name or IP address at the current time. Only the
 snapshot supplies trust anchors; certificates on stdin do not establish trust.
 It prints `Verified` and exits 0 on success, or reports an error on stderr and
-exits 1. Both `--store` and `--server-name` are required. Missing intermediates
+exits 1. `--server-name` is required. Missing intermediates
 are not downloaded.
 
 Verification also checks the leaf against local revocation data using the

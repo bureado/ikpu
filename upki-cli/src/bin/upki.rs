@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use eyre::{Context, Report, bail};
 use rustls::RootCertStore;
 use rustls::client::danger::ServerCertVerifier;
@@ -98,6 +98,9 @@ fn run_cert_store(
     command: CertStoreCommand,
     config_file: Option<PathBuf>,
 ) -> Result<ExitCode, Report> {
+    let config_path =
+        ConfigPath::new(config_file.clone()).wrap_err("cannot find configuration path")?;
+    let config = Config::from_file_or_user_default(&config_path)?;
     match command {
         CertStoreCommand::Sync {
             store,
@@ -105,17 +108,18 @@ fn run_cert_store(
             distro,
             allow_revoked,
         } => {
+            let store = store.resolve(&config)?;
             let distro = match distro {
                 Some(distro) => distro,
                 None => detect_distro()?,
             };
             let strategy = distro.strategy(bundle)?;
             let certificates = strategy.load()?;
-            let revocation_store = revocation_store(config_file)?;
+            let revocation_store = Store::from_config(&config);
             let certificates = filter_revoked(certificates, &revocation_store, allow_revoked)?;
             let mut certificate_store = open_certificate_store(&store)?;
             strategy.reconcile(&mut certificate_store, &certificates)?;
-            certificate_store.save(&store)?;
+            save_certificate_store(&certificate_store, &store)?;
             eprintln!(
                 "Synchronized {} snapshot with {} certificates to {}",
                 distro,
@@ -127,6 +131,7 @@ fn run_cert_store(
             store,
             allow_revoked,
         } => {
+            let store = store.resolve(&config)?;
             let mut reader = BufReader::new(stdin());
             let certificates = CertificateDer::pem_reader_iter(&mut reader)
                 .collect::<Result<Vec<_>, _>>()
@@ -134,13 +139,13 @@ fn run_cert_store(
             if certificates.is_empty() {
                 bail!("standard input contains no certificates");
             }
-            let revocation_store = revocation_store(config_file)?;
+            let revocation_store = Store::from_config(&config);
             let certificates = filter_revoked(certificates, &revocation_store, allow_revoked)?;
             let mut certificate_store = open_certificate_store(&store)?;
             for certificate in &certificates {
                 certificate_store.add(certificate.as_ref())?;
             }
-            certificate_store.save(&store)?;
+            save_certificate_store(&certificate_store, &store)?;
             eprintln!(
                 "Imported {} manual certificates to {}",
                 certificates.len(),
@@ -148,6 +153,7 @@ fn run_cert_store(
             );
         }
         CertStoreCommand::List { store, show_source } => {
+            let store = store.resolve(&config)?;
             let certificate_store = CertificateStore::open(&store)?;
             for (fingerprint, _) in certificate_store.iter() {
                 if show_source {
@@ -161,6 +167,7 @@ fn run_cert_store(
             }
         }
         CertStoreCommand::Export { store, fingerprint } => {
+            let store = store.resolve(&config)?;
             let certificate_store = CertificateStore::open(&store)?;
             let fingerprint = Fingerprint::from_hex(&fingerprint)?;
             let der = certificate_store
@@ -170,6 +177,7 @@ fn run_cert_store(
             stdout.write_all(der)?;
         }
         CertStoreCommand::Verify { store, server_name } => {
+            let store = store.resolve(&config)?;
             let server_name = ServerName::try_from(server_name).wrap_err("invalid server name")?;
             let certificate_store =
                 CertificateStore::open(&store).wrap_err("cannot open certificate store")?;
@@ -242,10 +250,15 @@ fn source_name(source: upki::cert_store::CertificateSource) -> &'static str {
     }
 }
 
-fn revocation_store(config_file: Option<PathBuf>) -> Result<Store, Report> {
-    let config_path = ConfigPath::new(config_file).wrap_err("cannot find configuration path")?;
-    let config = Config::from_file_or_user_default(&config_path)?;
-    Ok(Store::from_config(&config))
+fn save_certificate_store(store: &CertificateStore, path: &std::path::Path) -> Result<(), Report> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).wrap_err("cannot create certificate store directory")?;
+    }
+    store.save(path)?;
+    Ok(())
 }
 
 fn filter_revoked(
@@ -356,9 +369,8 @@ enum CertStoreCommand {
     /// coverage is allowed. Does not fetch missing intermediates or revocation data.
     /// Prints "Verified" and exits 0 on success; errors exit 1.
     Verify {
-        /// Store snapshot file containing trusted certificates.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// Expected DNS name or IP address (not a URL).
         #[arg(long)]
         server_name: String,
@@ -370,9 +382,8 @@ enum CertStoreCommand {
     /// Reconciles distro-managed entries only inside upki's snapshot; it does not
     /// replace system trust files or redirect applications to this store.
     Sync {
-        /// Destination snapshot file.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// Distro adapter to use (autodetected when omitted).
         #[arg(long, value_enum)]
         distro: Option<CertStoreDistro>,
@@ -386,9 +397,8 @@ enum CertStoreCommand {
 
     /// Import administrator-managed certificates from PEM on standard input.
     Import {
-        /// Destination snapshot file.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// Allow certificates known to be revoked by the local revocation data.
         #[arg(long)]
         allow_revoked: bool,
@@ -396,9 +406,8 @@ enum CertStoreCommand {
 
     /// Print fingerprints for certificates in a store.
     List {
-        /// Store snapshot file.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// Include whether each certificate is manual or distro-managed.
         #[arg(long)]
         show_source: bool,
@@ -406,13 +415,32 @@ enum CertStoreCommand {
 
     /// Write one certificate's DER bytes to standard output.
     Export {
-        /// Store snapshot file.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// 64-digit hexadecimal SHA-256 fingerprint.
         #[arg(long)]
         fingerprint: String,
     },
+}
+
+#[derive(Debug, ClapArgs)]
+struct StoreOptions {
+    /// Snapshot path (default: UPKI_CERT_STORE, config cert-store, or cache-dir/certificates.store).
+    #[arg(long)]
+    store: Option<PathBuf>,
+}
+
+impl StoreOptions {
+    fn resolve(self, config: &Config) -> Result<PathBuf, Report> {
+        let path = self
+            .store
+            .or_else(|| std::env::var_os("UPKI_CERT_STORE").map(PathBuf::from))
+            .unwrap_or_else(|| config.cert_store_path_or_default());
+        if path.as_os_str().is_empty() {
+            bail!("certificate store path must not be empty");
+        }
+        Ok(path)
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

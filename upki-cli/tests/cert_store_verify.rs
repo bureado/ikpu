@@ -473,11 +473,8 @@ fn rejects_missing_corrupt_empty_and_malformed_stores() {
 }
 
 #[test]
-fn requires_store_and_server_name_options() {
-    for args in [
-        vec!["cert-store", "verify", "--store", "unused"],
-        vec!["cert-store", "verify", "--server-name", "example.com"],
-    ] {
+fn requires_server_name_option() {
+    for args in [vec!["cert-store", "verify", "--store", "unused"]] {
         let output = Command::new(env!("CARGO_BIN_EXE_upki"))
             .args(args)
             .output()
