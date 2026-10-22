@@ -81,13 +81,15 @@ specification](https://c2sp.org/upki-revocation@v1.0.0).
 
 `upki::cert_store::CertificateStore` provides an experimental independent
 snapshot for storing, looking up, and exporting certificates by SHA-256
-fingerprint. On Debian and Ubuntu, run `sync` after `update-ca-certificates`;
-the distro is autodetected when possible:
+fingerprint. On Debian/Ubuntu, run `sync` after `update-ca-certificates`; on
+Fedora/RHEL-family systems, run it after `update-ca-trust extract`.
+The distro is autodetected when possible:
 
 ```shell
 upki cert-store sync --store /var/lib/upki/certificates.store
 # Or specify the adapter:
 upki cert-store sync --distro ubuntu --store /var/lib/upki/certificates.store
+upki cert-store sync --distro fedora --store /var/lib/upki/certificates.store
 upki cert-store list --store /var/lib/upki/certificates.store
 upki cert-store export --store /var/lib/upki/certificates.store --fingerprint <sha256>
 ```
@@ -103,7 +105,10 @@ This store does not yet verify certificate chains or reproduce distro
 trust/distrust policy, and certificate presentation is not implemented.
 See [CERTIFICATE-STORE.md](CERTIFICATE-STORE.md) and the
 [Debian/Ubuntu adapter specification](upki/src/cert_store/distro/README.md)
-for assumptions and limitations.
+and [Fedora/RHEL specification](upki/src/cert_store/distro/FEDORA.md) for
+assumptions, shared distro families, and limitations. Fedora/RHEL uses p11-kit
+to select server-authentication CA anchors rather than reading a raw bundle;
+it does not accept `--bundle`.
 
 # Packaging
 

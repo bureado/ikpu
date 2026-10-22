@@ -57,6 +57,20 @@ Manual entries take precedence over distro entries and survive authoritative
 syncs. The Debian/Ubuntu strategy is documented in
 [its specification](../upki/src/cert_store/distro/README.md).
 
+Fedora and the RHEL family (RHEL, CentOS/Stream, Rocky, AlmaLinux, Oracle Linux)
+share a p11-kit strategy. After a successful `update-ca-trust extract`, run:
+
+```sh
+upki cert-store sync --distro fedora --store /var/lib/upki/certificates.store
+```
+
+Use `rhel`, `centos`, `rocky`, `almalinux`, or `oracle-linux` for those systems;
+omitting `--distro` also detects their IDs. The adapter invokes `/usr/bin/trust`
+to extract server-authentication CA anchors with system policy applied.
+It rejects `--bundle` and does not replace any system trust outputs.
+See the [Fedora/RHEL specification](../upki/src/cert_store/distro/FEDORA.md)
+for assumptions, package integration, and the unimplemented presentation layer.
+
 The store preserves certificate bytes and provenance; it does not perform
 certificate-chain verification or reproduce distro trust/distrust attributes.
 
