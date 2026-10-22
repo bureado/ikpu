@@ -24,8 +24,10 @@ snapshot. Sync is idempotent, skips cloning known fingerprints, and removes
 distro-managed entries absent from the newly generated bundle.
 
 When `--distro` is omitted, the CLI uses `whatadistro` to inspect
-`/etc/os-release`. Only Debian and Ubuntu are currently supported by this
-strategy. The `--bundle` option is intended for the same PEM bundle format.
+`/etc/os-release`. Only Debian and Ubuntu are supported by this strategy;
+Fedora and the RHEL family use a separate
+[p11-kit strategy](FEDORA.md). The `--bundle` option is intended for the same
+PEM bundle format and is not accepted by the Fedora/RHEL strategy.
 
 ## Administrator certificates and revocation
 
@@ -60,5 +62,6 @@ FUSE views, or fs-verity-backed files without changing ingestion.
 
 The distro bundle's PEM blocks are stored as DER bytes. Trust purpose,
 distrust attributes, and local-versus-package origin are not recoverable from
-the bundle alone. A `p11-kit` strategy is therefore needed for distributions
-whose trust model cannot be represented as a flat PEM bundle.
+the bundle alone. The [Fedora/RHEL p11-kit strategy](FEDORA.md) instead delegates
+policy selection to the system tool and snapshots only server-authentication
+anchors.

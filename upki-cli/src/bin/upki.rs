@@ -4,16 +4,19 @@ use core::fmt;
 use std::io::{BufReader, Write, stdin};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Context, Report, bail};
-use rustls_pki_types::CertificateDer;
+use rustls::RootCertStore;
+use rustls::client::danger::ServerCertVerifier;
 use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use upki::cert_store::distro::{DebianUbuntu, IngestionStrategy};
+use upki::cert_store::distro::{DebianUbuntu, FedoraRhel, IngestionStrategy};
 use upki::cert_store::{CertificateStore, Fingerprint};
 #[cfg(feature = "__fetch")]
 use upki::fetch;
@@ -106,7 +109,7 @@ fn run_cert_store(
                 Some(distro) => distro,
                 None => detect_distro()?,
             };
-            let strategy = DebianUbuntu::new(bundle);
+            let strategy = distro.strategy(bundle)?;
             let certificates = strategy.load()?;
             let revocation_store = revocation_store(config_file)?;
             let certificates = filter_revoked(certificates, &revocation_store, allow_revoked)?;
@@ -166,6 +169,46 @@ fn run_cert_store(
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(der)?;
         }
+        CertStoreCommand::Verify { store, server_name } => {
+            let server_name = ServerName::try_from(server_name).wrap_err("invalid server name")?;
+            let certificate_store =
+                CertificateStore::open(&store).wrap_err("cannot open certificate store")?;
+            let mut roots = RootCertStore::empty();
+            for (fingerprint, der) in certificate_store.iter() {
+                roots
+                    .add(CertificateDer::from(der))
+                    .wrap_err_with(|| format!("invalid trust anchor: {}", fingerprint.to_hex()))?;
+            }
+            if roots.is_empty() {
+                bail!("cannot build certificate verifier: no trust anchors");
+            }
+            let verifier = rustls_upki::ServerVerifier::new(
+                rustls_upki::Policy {
+                    missing_data: rustls_upki::Outcome::Allowed,
+                    ..Default::default()
+                },
+                config_file,
+                Arc::new(roots),
+                Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+            )
+            .wrap_err("cannot build certificate verifier")?;
+            let certificates = CertificateDer::pem_reader_iter(&mut BufReader::new(stdin()))
+                .collect::<Result<Vec<_>, _>>()
+                .wrap_err("cannot parse certificates from stdin")?;
+            let (end_entity, intermediates) = certificates
+                .split_first()
+                .ok_or_else(|| eyre::eyre!("standard input contains no certificates"))?;
+            verifier
+                .verify_server_cert(
+                    end_entity,
+                    intermediates,
+                    &server_name,
+                    &[],
+                    UnixTime::now(),
+                )
+                .wrap_err("certificate verification failed")?;
+            println!("Verified");
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -180,8 +223,14 @@ fn distro_from_id(id: &str) -> Result<CertStoreDistro, Report> {
     match id {
         "debian" => Ok(CertStoreDistro::Debian),
         "ubuntu" => Ok(CertStoreDistro::Ubuntu),
+        "fedora" => Ok(CertStoreDistro::Fedora),
+        "rhel" => Ok(CertStoreDistro::Rhel),
+        "centos" => Ok(CertStoreDistro::Centos),
+        "rocky" => Ok(CertStoreDistro::Rocky),
+        "almalinux" => Ok(CertStoreDistro::Almalinux),
+        "ol" => Ok(CertStoreDistro::OracleLinux),
         detected => bail!(
-            "automatic certificate-store sync is unsupported for {detected}; pass --distro debian or ubuntu"
+            "automatic certificate-store sync is unsupported for {detected}; use --distro with a compatible adapter (see sync --help)"
         ),
     }
 }
@@ -296,6 +345,25 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum CertStoreCommand {
+    /// Verify a PEM certificate chain from standard input against the store.
+    ///
+    /// The first certificate must be the TLS server's end-entity certificate,
+    /// followed by any intermediates. Only certificates in the store are trusted;
+    /// roots supplied on stdin do not establish trust.
+    ///
+    /// Checks signatures, validity dates, server-auth usage, and the server name.
+    /// Checks leaf revocation when local data is available. Missing data or
+    /// coverage is allowed. Does not fetch missing intermediates or revocation data.
+    /// Prints "Verified" and exits 0 on success; errors exit 1.
+    Verify {
+        /// Store snapshot file containing trusted certificates.
+        #[arg(long)]
+        store: PathBuf,
+        /// Expected DNS name or IP address (not a URL).
+        #[arg(long)]
+        server_name: String,
+    },
+
     /// Replace distro-managed entries from the generated system certificate source.
     ///
     /// Run after the distro updates its trust store, such as from a package hook.
@@ -306,7 +374,7 @@ enum CertStoreCommand {
         /// Distro adapter to use (autodetected when omitted).
         #[arg(long, value_enum)]
         distro: Option<CertStoreDistro>,
-        /// Override the adapter's default generated bundle path.
+        /// Override the Debian/Ubuntu generated bundle path (not supported by Fedora/RHEL).
         #[arg(long)]
         bundle: Option<PathBuf>,
         /// Allow certificates known to be revoked by the local revocation data.
@@ -349,6 +417,33 @@ enum CertStoreCommand {
 enum CertStoreDistro {
     Debian,
     Ubuntu,
+    Fedora,
+    Rhel,
+    Centos,
+    Rocky,
+    Almalinux,
+    OracleLinux,
+}
+
+impl CertStoreDistro {
+    fn strategy(self, bundle: Option<PathBuf>) -> Result<Box<dyn IngestionStrategy>, Report> {
+        match self {
+            Self::Debian | Self::Ubuntu => Ok(Box::new(DebianUbuntu::new(bundle))),
+            Self::Fedora
+            | Self::Rhel
+            | Self::Centos
+            | Self::Rocky
+            | Self::Almalinux
+            | Self::OracleLinux => {
+                if bundle.is_some() {
+                    bail!(
+                        "--bundle is only supported by Debian/Ubuntu; Fedora/RHEL requires p11-kit policy extraction"
+                    );
+                }
+                Ok(Box::new(FedoraRhel::new()))
+            }
+        }
+    }
 }
 
 impl fmt::Display for CertStoreDistro {
@@ -356,6 +451,12 @@ impl fmt::Display for CertStoreDistro {
         match self {
             Self::Debian => f.write_str("Debian"),
             Self::Ubuntu => f.write_str("Ubuntu"),
+            Self::Fedora => f.write_str("Fedora"),
+            Self::Rhel => f.write_str("RHEL"),
+            Self::Centos => f.write_str("CentOS"),
+            Self::Rocky => f.write_str("Rocky Linux"),
+            Self::Almalinux => f.write_str("AlmaLinux"),
+            Self::OracleLinux => f.write_str("Oracle Linux"),
         }
     }
 }
@@ -396,6 +497,37 @@ mod tests {
             distro_from_id("debian").unwrap(),
             CertStoreDistro::Debian
         ));
-        assert!(distro_from_id("fedora").is_err());
+        for id in ["fedora", "rhel", "centos", "rocky", "almalinux", "ol"] {
+            let strategy = distro_from_id(id)
+                .unwrap()
+                .strategy(None)
+                .unwrap();
+            assert_eq!(
+                strategy.source_path(),
+                std::path::Path::new("/usr/bin/trust")
+            );
+        }
+        assert!(distro_from_id("arch").is_err());
+        assert!(distro_from_id("opensuse-leap").is_err());
+        assert!(distro_from_id("alpine").is_err());
+    }
+
+    #[test]
+    fn bundle_overrides_are_only_supported_for_debian_ubuntu() {
+        let bundle = PathBuf::from("/test/bundle.pem");
+        for distro in [CertStoreDistro::Debian, CertStoreDistro::Ubuntu] {
+            let strategy = distro
+                .strategy(Some(bundle.clone()))
+                .unwrap();
+            assert_eq!(strategy.source_path(), bundle);
+        }
+        for id in ["fedora", "rhel", "centos", "rocky", "almalinux", "ol"] {
+            assert!(
+                distro_from_id(id)
+                    .unwrap()
+                    .strategy(Some(bundle.clone()))
+                    .is_err()
+            );
+        }
     }
 }

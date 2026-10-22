@@ -42,7 +42,56 @@ fn cert_store_sync_accepts_a_distro_option() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("--distro"));
     assert!(stdout.contains("--allow-revoked"));
+    for distro in [
+        "fedora",
+        "rhel",
+        "centos",
+        "rocky",
+        "almalinux",
+        "oracle-linux",
+    ] {
+        assert!(stdout.contains(distro));
+    }
     assert!(!stdout.contains("sync-ubuntu"));
+}
+
+#[test]
+fn cert_store_fedora_family_rejects_bundle_overrides_without_changing_store() {
+    let directory = TempDir::new().unwrap();
+    let store = directory
+        .path()
+        .join("certificates.store");
+    let original = b"existing snapshot must not be touched";
+    fs::write(&store, original).unwrap();
+    for distro in [
+        "fedora",
+        "rhel",
+        "centos",
+        "rocky",
+        "almalinux",
+        "oracle-linux",
+    ] {
+        let output = upki()
+            .args([
+                "cert-store",
+                "sync",
+                "--distro",
+                distro,
+                "--bundle",
+                "unused.pem",
+                "--store",
+            ])
+            .arg(&store)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("--bundle is only supported")
+        );
+        assert_eq!(fs::read(&store).unwrap(), original);
+    }
 }
 
 #[test]

@@ -21,10 +21,14 @@ whether an issued certificate is revoked.
   [Debian manual](https://manpages.debian.org/stable/ca-certificates/update-ca-certificates.8.en.html).
 - **Fedora and RHEL family:** system-wide trust is managed with `p11-kit` and
   `update-ca-trust`, with administrator sources under `/etc/pki/ca-trust` and
-  generated, application-oriented outputs. This needs a distinct adapter;
+  generated, application-oriented outputs. This uses a distinct adapter;
   treating an OpenSSL bundle as the authoritative source may lose trust
   attributes and distrust policy.
   Reference: [Fedora shared system certificates](https://docs.fedoraproject.org/en-US/quick-docs/using-shared-system-certificates/).
+  The [Fedora/RHEL strategy](upki/src/cert_store/distro/FEDORA.md) invokes
+  p11-kit to extract only server-authentication CA anchors. Fedora, RHEL,
+  CentOS/Stream, Rocky, AlmaLinux, and Oracle Linux share this approach;
+  other p11-kit distributions are not automatically assumed compatible.
 - **Alpine:** `update-ca-certificates` builds the familiar PEM bundle from
   `/usr/share/ca-certificates` and `/usr/local/share/ca-certificates`; minimal
   images may only include the static `ca-certificates-bundle` package.
@@ -146,6 +150,43 @@ Further work includes stronger malformed-input and ownership coverage,
 consistent handling of unusable anchors, purpose-specific trust/distrust
 semantics, and verified deployment recipes for individual consumers. The
 filesystem-based compatibility fallback remains separate future work.
+Fedora/RHEL-family systems select the p11-kit adapter with `--distro fedora`,
+`rhel`, `centos`, `rocky`, `almalinux`, or `oracle-linux`, or by autodetection.
+Run sync after a successful `update-ca-trust extract`. This adapter calls
+`/usr/bin/trust extract --filter=ca-anchors --purpose=server-auth --format=pem-bundle`
+with a private temporary destination, then uses the same revocation filtering
+and reconciliation as Debian/Ubuntu. It rejects `--bundle`, fails on extraction
+errors or empty output, and leaves system files unchanged. The snapshot is
+only a server-auth anchor projection; it does not retain arbitrary p11-kit
+trust or distrust objects. Presentation remains explicitly unsupported.
+## Verifying a presented certificate
+
+`upki cert-store verify` reads a PEM chain from standard input, with the leaf
+first and any intermediates following it:
+
+```sh
+cat server-chain.pem | upki cert-store verify \
+  --store /var/lib/upki/certificates.store --server-name example.com
+```
+
+The required `--server-name` is a DNS name or IP address, not a URL. Rustls'
+WebPKI server verifier checks the chain's signatures, validity dates, TLS
+server-auth usage, and name at the current time. Every certificate in the
+snapshot is an explicit trust anchor, regardless of provenance; no system or
+built-in roots are added, and roots supplied on stdin do not establish trust.
+As with ordinary TLS trust anchors, the anchor's own signature and validity
+period are not checked. Only import certificates you intend to trust.
+
+Success prints `Verified` and exits 0. Rejected certificates, unreadable or
+corrupt stores, empty stores, invalid anchors, and malformed or empty input
+report an error on stderr and exit 1. Missing intermediates are not fetched.
+Verification loads the usual configuration (or defaults), including
+`--config-file` when supplied, and checks the leaf against local revocation
+data. A revocation match fails verification with exit 1. Missing data, missing
+SCTs, or lack of coverage do not fail verification; no revocation data is
+downloaded. Use `upki fetch` to populate or update the local data.
+This operation does not recover distro purpose/distrust attributes that were
+lost when generating the ingested PEM bundle.
 
 ## Proposed roadmap
 
@@ -154,22 +195,29 @@ filesystem-based compatibility fallback remains separate future work.
    duplicate and distrust semantics, and limits appropriate to real
    distribution stores.
 2. **Expand distro adapters.** Add fixture-based package-hook and upgrade
-   coverage for Debian/Ubuntu, then add a `p11-kit` adapter for Fedora/RHEL
-   rather than assuming identical semantics. Evaluate Alpine's bundle-only case.
+   coverage for Debian/Ubuntu and the Fedora/RHEL p11-kit adapter. Validate
+   actual RPM transaction ordering and the supported release matrix.
+   Evaluate Alpine's bundle-only case and other p11-kit distro integrations.
 3. **Provide useful queries.** Add a CLI verification operation that validates
    a presented chain and name against the loaded roots, plus certificate
    lookup/export by stable fingerprint. Define policy for missing, malformed,
    expired, or distrusted roots before wiring it into TLS consumers.
-4. **Integrate TLS libraries.** Add a Rustls root-store/verifier adapter and
+   coverage for Debian/Ubuntu, then add a `p11-kit` adapter for Fedora/RHEL
+   rather than assuming identical semantics. Evaluate Alpine's bundle-only case.
+4. **Expand useful queries.** CLI chain/name verification and certificate
+   lookup/export by stable fingerprint are implemented. Extend the explicit
+   trust-anchor policy to model distro purpose and distrust attributes before
+   wiring the snapshot into TLS consumers.
+5. **Integrate TLS libraries.** Add a Rustls root-store/verifier adapter and
    an OpenSSL trust-store integration. Keep existing OpenSSL revocation
    callback behavior distinct from trust-anchor selection; test that the new
    path never weakens ordinary chain, hostname, or signature verification.
-5. **Offer compatibility views.** Generate conventional PEM/hash-directory
+6. **Offer compatibility views.** Generate conventional PEM/hash-directory
    exports first. Only then assess a read-only FUSE projection and container
    runtime mount support. Prefer explicit host-generated snapshots or mounts
    over requiring FUSE inside containers, which is commonly unavailable or
    restricted.
-6. **Operationalize.** Specify package locations, ownership, atomic updates,
+7. **Operationalize.** Specify package locations, ownership, atomic updates,
    service reload behavior, rollback, and the supported distro/release matrix.
    Add postinst/scriptlet examples and CI or VM coverage for Ubuntu 26.04 and
    each subsequently supported adapter.
