@@ -9,7 +9,6 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Context, Report, bail};
 use rustls::RootCertStore;
-use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::ServerCertVerifier;
 use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
@@ -180,11 +179,18 @@ fn run_cert_store(
                     .add(CertificateDer::from(der))
                     .wrap_err_with(|| format!("invalid trust anchor: {}", fingerprint.to_hex()))?;
             }
-            let verifier = WebPkiServerVerifier::builder_with_provider(
+            if roots.is_empty() {
+                bail!("cannot build certificate verifier: no trust anchors");
+            }
+            let verifier = rustls_upki::ServerVerifier::new(
+                rustls_upki::Policy {
+                    missing_data: rustls_upki::Outcome::Allowed,
+                    ..Default::default()
+                },
+                config_file,
                 Arc::new(roots),
                 Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
             )
-            .build()
             .wrap_err("cannot build certificate verifier")?;
             let certificates = CertificateDer::pem_reader_iter(&mut BufReader::new(stdin()))
                 .collect::<Result<Vec<_>, _>>()
@@ -340,7 +346,8 @@ enum CertStoreCommand {
     /// roots supplied on stdin do not establish trust.
     ///
     /// Checks signatures, validity dates, server-auth usage, and the server name.
-    /// This does not check revocation or fetch missing intermediates.
+    /// Checks leaf revocation when local data is available. Missing data or
+    /// coverage is allowed. Does not fetch missing intermediates or revocation data.
     /// Prints "Verified" and exits 0 on success; errors exit 1.
     Verify {
         /// Store snapshot file containing trusted certificates.

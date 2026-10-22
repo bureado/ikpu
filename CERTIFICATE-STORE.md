@@ -107,8 +107,11 @@ period are not checked. Only import certificates you intend to trust.
 Success prints `Verified` and exits 0. Rejected certificates, unreadable or
 corrupt stores, empty stores, invalid anchors, and malformed or empty input
 report an error on stderr and exit 1. Missing intermediates are not fetched.
-Verification does not load configuration or revocation data and does not
-check revocation; use `upki revocation check` separately for that purpose.
+Verification loads the usual configuration (or defaults), including
+`--config-file` when supplied, and checks the leaf against local revocation
+data. A revocation match fails verification with exit 1. Missing data, missing
+SCTs, or lack of coverage do not fail verification; no revocation data is
+downloaded. Use `upki fetch` to populate or update the local data.
 This operation does not recover distro purpose/distrust attributes that were
 lost when generating the ingested PEM bundle.
 

@@ -2849,6 +2849,8 @@ name = "upki-cli"
 version = "1.0.1"
 dependencies = [
  "clap",
+ "clubcard",
+ "clubcard-crlite",
  "eyre",
  "insta",
  "insta-cmd",
@@ -2857,6 +2859,7 @@ dependencies = [
  "regex",
  "rustls",
  "rustls-pki-types",
+ "rustls-upki",
  "tempfile",
  "tiny_http",
  "tokio",

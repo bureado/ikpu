@@ -73,10 +73,13 @@ usage, and the expected DNS name or IP address at the current time. Only the
 snapshot supplies trust anchors; certificates on stdin do not establish trust.
 It prints `Verified` and exits 0 on success, or reports an error on stderr and
 exits 1. Both `--store` and `--server-name` are required. Missing intermediates
-are not downloaded. No upki configuration or revocation data is needed.
+are not downloaded.
 
-This is a trust check, not a revocation check; use `upki revocation check`
-separately for revocation status. The store preserves certificate bytes and
+Verification also checks the leaf against local revocation data using the
+usual configuration or defaults (`--config-file` is supported). A revocation
+match fails with exit 1; missing data, missing SCTs, or lack of coverage are
+allowed. Revocation data is not downloaded; use `upki fetch` to load or update
+it. The store preserves certificate bytes and
 provenance but does not reproduce distro trust/distrust attributes. Every
 stored certificate is used as a trust anchor regardless of provenance, so
 only import certificates you intend to trust.

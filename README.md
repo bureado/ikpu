@@ -109,9 +109,10 @@ cat server-chain.pem | upki cert-store verify \
 
 This checks signatures, validity dates, server-auth usage, and the server name
 using only the stored trust anchors. It prints `Verified` and exits 0 on
-success; errors exit 1. It does not fetch intermediates or check revocation;
-`upki revocation check` remains a separate operation. Verification needs no
-revocation data or configuration file. All stored certificates are treated as
+success; errors exit 1. It also checks the leaf against local revocation data
+and fails on a match. Missing data, missing SCTs, or lack of coverage are
+allowed. It uses the usual configuration or defaults and does not download
+intermediates or revocation data. All stored certificates are treated as
 trust anchors, so only import certificates you intend to trust.
 
 The store does not reproduce distro trust/distrust policy, and certificate
