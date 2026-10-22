@@ -24,8 +24,9 @@ snapshot. Sync is idempotent, skips cloning known fingerprints, and removes
 distro-managed entries absent from the newly generated bundle.
 
 When `--distro` is omitted, the CLI uses `whatadistro` to inspect
-`/etc/os-release`. Only Debian and Ubuntu are supported by this strategy;
-Fedora and the RHEL family use a separate
+`/etc/os-release`. Debian and Ubuntu use this bundle strategy. Alpine uses the
+same bundle path and format but is documented separately in
+[ALPINE.md](ALPINE.md). Fedora and the RHEL family use a separate
 [p11-kit strategy](FEDORA.md). The `--bundle` option is intended for the same
 PEM bundle format and is not accepted by the Fedora/RHEL strategy.
 

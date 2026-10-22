@@ -29,14 +29,20 @@ whether an issued certificate is revoked.
   p11-kit to extract only server-authentication CA anchors. Fedora, RHEL,
   CentOS/Stream, Rocky, AlmaLinux, and Oracle Linux share this approach;
   other p11-kit distributions are not automatically assumed compatible.
-- **Alpine:** `update-ca-certificates` builds the familiar PEM bundle from
-  `/usr/share/ca-certificates` and `/usr/local/share/ca-certificates`; minimal
-  images may only include the static `ca-certificates-bundle` package.
-  Reference: [Alpine update-ca-certificates manual](https://github.com/alpinelinux/ca-certificates/blob/master/update-ca-certificates.8).
+- **Alpine:** `update-ca-certificates` generates the same
+  `/etc/ssl/certs/ca-certificates.crt` PEM bundle from enabled certificates
+  under `/usr/share/ca-certificates` and local certificates under
+  `/usr/local/share/ca-certificates`. The `ca-certificates-bundle` package
+  provides this bundle at that path and `/etc/ssl/cert.pem` as a compatibility
+  symlink; the `ca-certificates` package trigger runs `update-ca-certificates`
+  after relevant changes. The adapter reads the generated bundle, not the
+  source directories or symlink. References:
+  [Alpine update-ca-certificates manual](https://github.com/alpinelinux/ca-certificates/blob/master/update-ca-certificates.8),
+  [Alpine ca-certificates package recipe](https://github.com/alpinelinux/aports/blob/master/main/ca-certificates/APKBUILD).
 
-The Debian/Ubuntu bundle is a useful first adapter because package hooks can
-run `upki` after the distro's own update command and do not need to duplicate
-its trust-policy interpretation. The CLI was exercised in an Ubuntu 26.04
+The Debian/Ubuntu/Alpine bundle is a straightforward adapter because package
+hooks can run `upki` after the distro's own update command and do not need to
+duplicate its trust-policy interpretation. The CLI was exercised in an Ubuntu 26.04
 container after installing `ca-certificates`: it ingested the generated bundle,
 and the full set of 123 store fingerprints matched an independent SHA-256
 calculation over every PEM certificate. This manual sync does not yet validate
@@ -55,12 +61,13 @@ fingerprints detect accidental corruption and malformed snapshots; they are
 rewrite it. File ownership and permissions remain part of the system security
 boundary.
 
-The shared Debian/Ubuntu adapter is selected with `--distro debian` or
-`--distro ubuntu`; when omitted, `whatadistro` reads `/etc/os-release` and
-selects a supported adapter when possible. `sync` reads
+The shared PEM-bundle adapter is selected with `--distro debian`,
+`--distro ubuntu`, or `--distro alpine`; when omitted, `whatadistro` reads
+`/etc/os-release` and selects a supported adapter when possible. `sync` reads
 `/etc/ssl/certs/ca-certificates.crt` by default (or an explicit `--bundle`
-path). A package integration can invoke it after `update-ca-certificates`; for
-example:
+path). Debian/Ubuntu and Alpine package integrations can invoke it after
+`update-ca-certificates`; Alpine's package trigger can run the same sync after
+the generated bundle has been refreshed. For example:
 
 ```sh
 update-ca-certificates
@@ -87,6 +94,8 @@ The distro adapter and presentation strategy interfaces live in
 unsupported stub. The Debian/Ubuntu assumptions, package-hook contract,
 system paths, and OpenSSL compatibility notes are specified in
 [`upki/src/cert_store/distro/README.md`](upki/src/cert_store/distro/README.md).
+Alpine's bundle path and package-trigger integration are documented in
+[`upki/src/cert_store/distro/ALPINE.md`](upki/src/cert_store/distro/ALPINE.md).
 The CLI does not invoke `update-ca-certificates` itself or install package
 hooks.
 
@@ -218,9 +227,9 @@ lost when generating the ingested PEM bundle.
    duplicate and distrust semantics, and limits appropriate to real
    distribution stores.
 2. **Expand distro adapters.** Add fixture-based package-hook and upgrade
-   coverage for Debian/Ubuntu and the Fedora/RHEL p11-kit adapter. Validate
-   actual RPM transaction ordering and the supported release matrix.
-   Evaluate Alpine's bundle-only case and other p11-kit distro integrations.
+   coverage for Debian/Ubuntu, Alpine, and the Fedora/RHEL p11-kit adapter.
+   Validate Alpine and RPM package integration, and the supported release
+   matrices; evaluate other p11-kit distro integrations.
 3. **Provide useful queries.** Purpose-neutral CLI chain verification and
    certificate lookup/export by stable fingerprint are implemented. Define
    policy for missing, malformed, expired, or distrusted roots before wiring

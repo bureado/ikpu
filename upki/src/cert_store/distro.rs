@@ -14,12 +14,12 @@ use rustls_pki_types::pem::PemObject;
 
 use super::{CertificateStore, Error as StoreError};
 
-/// Ubuntu and Debian use the shared `ca-certificates` bundle strategy.
-pub struct DebianUbuntu {
+/// Debian, Ubuntu, and Alpine use the generated `ca-certificates` PEM bundle.
+pub struct CaCertificates {
     bundle: PathBuf,
 }
 
-impl DebianUbuntu {
+impl CaCertificates {
     /// Create the strategy for the generated system CA bundle.
     pub fn new(bundle: Option<PathBuf>) -> Self {
         Self {
@@ -27,6 +27,12 @@ impl DebianUbuntu {
         }
     }
 }
+
+/// Compatibility name for the Debian/Ubuntu certificate-bundle strategy.
+pub type DebianUbuntu = CaCertificates;
+
+/// Compatibility name for Alpine's certificate-bundle strategy.
+pub type Alpine = CaCertificates;
 
 /// Fedora and the RHEL family use p11-kit to select server-auth CA anchors.
 pub struct FedoraRhel;
@@ -79,7 +85,7 @@ pub trait IngestionStrategy {
     ) -> Result<(), StoreError>;
 }
 
-impl IngestionStrategy for DebianUbuntu {
+impl IngestionStrategy for CaCertificates {
     fn source_path(&self) -> &Path {
         &self.bundle
     }

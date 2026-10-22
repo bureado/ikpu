@@ -44,7 +44,7 @@ Options:
   -V, --version                    Print version
 ```
 
-For example, sync from the Debian/Ubuntu system bundle after its normal
+For example, sync from the Debian/Ubuntu/Alpine system bundle after its normal
 certificate update, then list or export certificates by SHA-256 fingerprint.
 `--distro` is optional when the current distribution can be autodetected:
 
@@ -73,6 +73,12 @@ known to be revoked, and accept `--allow-revoked` as an explicit override.
 Manual entries take precedence over distro entries and survive authoritative
 syncs. The Debian/Ubuntu strategy is documented in
 [its specification](../upki/src/cert_store/distro/README.md).
+
+Alpine uses the same generated `/etc/ssl/certs/ca-certificates.crt` bundle as
+Debian/Ubuntu. The `ca-certificates-bundle` package also exposes this bundle at
+`/etc/ssl/cert.pem`; both paths refer to the same certificate set. Sync after
+`update-ca-certificates` or after Alpine's `ca-certificates` package trigger
+has completed. See the [Alpine adapter specification](../upki/src/cert_store/distro/ALPINE.md).
 
 Fedora and the RHEL family (RHEL, CentOS/Stream, Rocky, AlmaLinux, Oracle Linux)
 share a p11-kit strategy. After a successful `update-ca-trust extract`, run:
