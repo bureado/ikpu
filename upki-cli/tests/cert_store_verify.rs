@@ -67,9 +67,9 @@ fn leaf_params() -> CertificateParams {
     params
 }
 
-fn verify(store: &Path, server_name: &str, pem: &str) -> Output {
+fn verify(store: &Path, pem: &str) -> Output {
     let temp = TempDir::new().unwrap();
-    verify_with_config(store, server_name, pem, &write_config(&temp))
+    verify_with_config(store, pem, &write_config(&temp))
 }
 
 fn write_config(temp: &TempDir) -> std::path::PathBuf {
@@ -85,13 +85,12 @@ fn write_config(temp: &TempDir) -> std::path::PathBuf {
     path
 }
 
-fn verify_with_config(store: &Path, server_name: &str, pem: &str, config: &Path) -> Output {
+fn verify_with_config(store: &Path, pem: &str, config: &Path) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_upki"))
         .arg("--config-file")
         .arg(config)
         .args(["cert-store", "verify", "--store"])
         .arg(store)
-        .args(["--server-name", server_name])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -216,18 +215,14 @@ fn checks_loaded_revocation_data_for_intermediate_and_root_issued_leaves() {
         let revoked = logged_leaf(issuer, 1);
         let unrevoked = logged_leaf(issuer, 2);
         let pem = revoked.pem() + &issuer.pem();
-        assert_verified(verify_with_config(&path, "example.com", &pem, &config));
+        assert_verified(verify_with_config(&path, &pem, &config));
         write_revocation_data(&temp, &revoked, issuer);
-        assert_rejected(
-            verify_with_config(&path, "example.com", &pem, &config),
-            "Revoked",
-        );
+        assert_rejected(verify_with_config(&path, &pem, &config), "Revoked");
         if !directly_issued {
             let unrelated = Chain::new();
             assert_rejected(
                 verify_with_config(
                     &path,
-                    "example.com",
                     &(revoked.pem() + &unrelated.intermediate.pem() + &issuer.pem()),
                     &config,
                 ),
@@ -236,24 +231,18 @@ fn checks_loaded_revocation_data_for_intermediate_and_root_issued_leaves() {
         }
         assert_verified(verify_with_config(
             &path,
-            "example.com",
             &(unrevoked.pem() + &issuer.pem()),
             &config,
         ));
         // The root need not be supplied on stdin, even for revocation checking.
         let direct = logged_leaf(&chain.root, 1);
-        let output = verify_with_config(&path, "example.com", &direct.pem(), &config);
+        let output = verify_with_config(&path, &direct.pem(), &config);
         if directly_issued {
             assert_rejected(output, "Revoked");
         } else {
             assert_verified(output);
         }
-        assert_verified(verify_with_config(
-            &path,
-            "example.com",
-            &chain.pem(),
-            &config,
-        ));
+        assert_verified(verify_with_config(&path, &chain.pem(), &config));
     }
 }
 
@@ -271,40 +260,36 @@ fn rejects_corrupt_revocation_data_and_invalid_configuration() {
         .path()
         .join("revocation/test.filter");
     std::fs::remove_file(&filter).unwrap();
-    assert_rejected(
-        verify_with_config(&path, "example.com", &pem, &config),
-        "cannot read file",
-    );
+    assert_rejected(verify_with_config(&path, &pem, &config), "cannot read file");
     std::fs::write(&filter, b"corrupt").unwrap();
     assert_rejected(
-        verify_with_config(&path, "example.com", &pem, &config),
+        verify_with_config(&path, &pem, &config),
         "cannot decode file",
     );
     std::fs::write(temp.path().join("revocation/index.bin"), b"corrupt").unwrap();
     assert_rejected(
-        verify_with_config(&path, "example.com", &pem, &config),
+        verify_with_config(&path, &pem, &config),
         "cannot decode index file",
     );
     std::fs::write(&config, b"not valid toml").unwrap();
     assert_rejected(
-        verify_with_config(&path, "example.com", &chain.pem(), &config),
+        verify_with_config(&path, &chain.pem(), &config),
         "failed to parse config file",
     );
     std::fs::remove_file(&config).unwrap();
     assert_rejected(
-        verify_with_config(&path, "example.com", &chain.pem(), &config),
+        verify_with_config(&path, &chain.pem(), &config),
         "failed to read config file",
     );
 }
 
 #[test]
-fn verifies_dns_and_ip_against_manual_and_distro_roots() {
+fn verifies_against_manual_and_distro_roots_without_a_name() {
     let chain = Chain::new();
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("certificates.store");
     chain.store(&path);
-    assert_verified(verify(&path, "example.com", &chain.pem()));
-    assert_verified(verify(&path, "127.0.0.1", &chain.pem()));
+    assert_verified(verify(&path, &chain.pem()));
 
     let mut store = CertificateStore::new();
     store
@@ -312,11 +297,7 @@ fn verifies_dns_and_ip_against_manual_and_distro_roots() {
         .unwrap();
     store.save(&path).unwrap();
     // A root in the input chain is harmless, but trust still comes from the store.
-    assert_verified(verify(
-        &path,
-        "example.com",
-        &(chain.pem() + &chain.root.pem()),
-    ));
+    assert_verified(verify(&path, &(chain.pem() + &chain.root.pem())));
 }
 
 #[test]
@@ -328,7 +309,7 @@ fn verifies_a_leaf_issued_directly_by_a_stored_root() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("certificates.store");
     chain.store(&path);
-    assert_verified(verify(&path, "example.com", &leaf.pem()));
+    assert_verified(verify(&path, &leaf.pem()));
 }
 
 #[test]
@@ -339,36 +320,26 @@ fn rejects_untrusted_roots_even_when_supplied_on_stdin() {
     let path = temp.path().join("certificates.store");
     unrelated.store(&path);
     assert_rejected(
-        verify(&path, "example.com", &(chain.pem() + &chain.root.pem())),
+        verify(&path, &(chain.pem() + &chain.root.pem())),
         "certificate verification failed",
     );
 }
 
 #[test]
-fn rejects_wrong_names_and_missing_intermediates() {
+fn rejects_missing_intermediates_and_wrong_chain_order() {
     let chain = Chain::new();
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("certificates.store");
     chain.store(&path);
-    for name in ["wrong.example", "127.0.0.2"] {
-        assert_rejected(verify(&path, name, &chain.pem()), "not valid for name");
-    }
+    assert_rejected(verify(&path, &chain.leaf.pem()), "UnknownIssuer");
     assert_rejected(
-        verify(&path, "example.com", &chain.leaf.pem()),
-        "UnknownIssuer",
-    );
-    assert_rejected(
-        verify(
-            &path,
-            "example.com",
-            &(chain.intermediate.pem() + &chain.leaf.pem()),
-        ),
+        verify(&path, &(chain.intermediate.pem() + &chain.leaf.pem())),
         "certificate verification failed",
     );
 }
 
 #[test]
-fn rejects_expired_future_and_client_only_certificates() {
+fn rejects_expired_and_future_certificates() {
     let chain = Chain::new();
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("certificates.store");
@@ -380,23 +351,13 @@ fn rejects_expired_future_and_client_only_certificates() {
     let mut future = leaf_params();
     future.not_before = date_time_ymd(3000, 1, 1);
     future.not_after = date_time_ymd(3001, 1, 1);
-    let mut client_only = leaf_params();
-    client_only.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
 
-    for (params, message) in [
-        (expired, "certificate expired"),
-        (future, "certificate not valid yet"),
-        (client_only, "certificate does not allow extended key usage"),
-    ] {
+    for (params, message) in [(expired, "CertExpired"), (future, "CertNotValidYet")] {
         let leaf = params
             .signed_by(&KeyPair::generate().unwrap(), &chain.intermediate)
             .unwrap();
         assert_rejected(
-            verify(
-                &path,
-                "example.com",
-                &(leaf.pem() + &chain.intermediate.pem()),
-            ),
+            verify(&path, &(leaf.pem() + &chain.intermediate.pem())),
             message,
         );
     }
@@ -410,39 +371,31 @@ fn rejects_a_signature_from_a_different_issuer_key() {
     let path = temp.path().join("certificates.store");
     chain.store(&path);
     assert_rejected(
-        verify(
-            &path,
-            "example.com",
-            &(other.leaf.pem() + &chain.intermediate.pem()),
-        ),
-        "BadSignature",
+        verify(&path, &(other.leaf.pem() + &chain.intermediate.pem())),
+        "InvalidSignatureForPublicKey",
     );
 }
 
 #[test]
-fn rejects_empty_malformed_input_and_invalid_server_names() {
+fn rejects_empty_and_malformed_input() {
     let chain = Chain::new();
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("certificates.store");
     chain.store(&path);
     for input in ["", "not a certificate"] {
         assert_rejected(
-            verify(&path, "example.com", input),
+            verify(&path, input),
             "standard input contains no certificates",
         );
     }
     let malformed = "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
     assert_rejected(
-        verify(&path, "example.com", malformed),
+        verify(&path, malformed),
         "cannot parse certificates from stdin",
     );
     assert_rejected(
-        verify(&path, "example.com", &(chain.pem() + malformed)),
+        verify(&path, &(chain.pem() + malformed)),
         "cannot parse certificates from stdin",
-    );
-    assert_rejected(
-        verify(&path, "https://example.com", ""),
-        "invalid server name",
     );
 }
 
@@ -450,42 +403,114 @@ fn rejects_empty_malformed_input_and_invalid_server_names() {
 fn rejects_missing_corrupt_empty_and_malformed_stores() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("certificates.store");
-    assert_rejected(
-        verify(&path, "example.com", ""),
-        "cannot open certificate store",
-    );
+    assert_rejected(verify(&path, ""), "cannot open certificate store");
     std::fs::write(&path, b"corrupt").unwrap();
-    assert_rejected(
-        verify(&path, "example.com", ""),
-        "cannot open certificate store",
-    );
+    assert_rejected(verify(&path, ""), "cannot open certificate store");
     let mut store = CertificateStore::new();
     store.save(&path).unwrap();
-    assert_rejected(
-        verify(&path, "example.com", ""),
-        "cannot build certificate verifier",
-    );
+    assert_rejected(verify(&path, ""), "cannot build certificate verifier");
     store
         .add(b"not a DER certificate")
         .unwrap();
     store.save(&path).unwrap();
-    assert_rejected(verify(&path, "example.com", ""), "invalid trust anchor:");
+    assert_rejected(verify(&path, ""), "invalid trust anchor:");
 }
 
 #[test]
-fn requires_store_and_server_name_options() {
-    for args in [
-        vec!["cert-store", "verify", "--store", "unused"],
-        vec!["cert-store", "verify", "--server-name", "example.com"],
+fn rejects_the_removed_server_name_option() {
+    let output = Command::new(env!("CARGO_BIN_EXE_upki"))
+        .args(["cert-store", "verify", "--server-name", "example.com"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--server-name'")
+    );
+}
+
+#[test]
+fn accepts_non_tls_purposes_and_certificates_without_subject_names() {
+    let chain = Chain::new();
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("certificates.store");
+    chain.store(&path);
+    for purposes in [
+        vec![],
+        vec![ExtendedKeyUsagePurpose::ClientAuth],
+        vec![ExtendedKeyUsagePurpose::CodeSigning],
+        vec![ExtendedKeyUsagePurpose::EmailProtection],
     ] {
-        let output = Command::new(env!("CARGO_BIN_EXE_upki"))
-            .args(args)
-            .output()
+        let mut params = CertificateParams::default();
+        params.extended_key_usages = purposes;
+        let leaf = params
+            .signed_by(&KeyPair::generate().unwrap(), &chain.intermediate)
             .unwrap();
-        assert_eq!(output.status.code(), Some(2));
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("required arguments were not provided")
+        assert_verified(verify(&path, &(leaf.pem() + &chain.intermediate.pem())));
+    }
+}
+
+#[test]
+fn rejects_malformed_eku_in_leaves_and_intermediates() {
+    let chain = Chain::new();
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("certificates.store");
+    chain.store(&path);
+    // A sequence containing an INTEGER instead of an EKU OBJECT IDENTIFIER.
+    let malformed_eku =
+        || CustomExtension::from_oid_content(&[2, 5, 29, 37], vec![0x30, 3, 2, 1, 1]);
+    let mut params = CertificateParams::default();
+    params
+        .custom_extensions
+        .push(malformed_eku());
+    let leaf = params
+        .signed_by(&KeyPair::generate().unwrap(), &chain.intermediate)
+        .unwrap();
+    assert_rejected(
+        verify(&path, &(leaf.pem() + &chain.intermediate.pem())),
+        "certificate verification failed",
+    );
+
+    let mut params = ca_params("malformed intermediate");
+    params
+        .custom_extensions
+        .push(malformed_eku());
+    let intermediate =
+        CertifiedIssuer::signed_by(params, KeyPair::generate().unwrap(), &chain.root).unwrap();
+    let leaf = leaf_params()
+        .signed_by(&KeyPair::generate().unwrap(), &intermediate)
+        .unwrap();
+    assert_rejected(
+        verify(&path, &(leaf.pem() + &intermediate.pem())),
+        "certificate verification failed",
+    );
+}
+
+#[test]
+fn rejects_non_ca_issuers_and_path_length_violations() {
+    let chain = Chain::new();
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("certificates.store");
+    chain.store(&path);
+    for is_ca in [
+        IsCa::ExplicitNoCa,
+        IsCa::Ca(BasicConstraints::Constrained(0)),
+    ] {
+        let mut params = ca_params("constrained issuer");
+        params.is_ca = is_ca;
+        let issuer =
+            CertifiedIssuer::signed_by(params, KeyPair::generate().unwrap(), &chain.root).unwrap();
+        let intermediate = CertifiedIssuer::signed_by(
+            ca_params("child intermediate"),
+            KeyPair::generate().unwrap(),
+            &issuer,
+        )
+        .unwrap();
+        let leaf = leaf_params()
+            .signed_by(&KeyPair::generate().unwrap(), &intermediate)
+            .unwrap();
+        assert_rejected(
+            verify(&path, &(leaf.pem() + &intermediate.pem() + &issuer.pem())),
+            "certificate verification failed",
         );
     }
 }

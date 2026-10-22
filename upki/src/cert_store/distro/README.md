@@ -59,6 +59,8 @@ replace or modify either path; applications continue to use the distro store.
 The shared presentation-strategy interface currently returns an unsupported
 result. Future strategies may provide conventional PEM/hash-directory exports,
 FUSE views, or fs-verity-backed files without changing ingestion.
+A future `upki cert-store serve` command would own that replacement/presentation
+step; `sync` remains an import into the independent snapshot.
 
 The distro bundle's PEM blocks are stored as DER bytes. Trust purpose,
 distrust attributes, and local-versus-package origin are not recoverable from

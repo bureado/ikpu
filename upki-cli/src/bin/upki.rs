@@ -4,14 +4,11 @@ use core::fmt;
 use std::io::{BufReader, Write, stdin};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
 use eyre::{Context, Report, bail};
-use rustls::RootCertStore;
-use rustls::client::danger::ServerCertVerifier;
 use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls_pki_types::{CertificateDer, UnixTime};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -98,6 +95,8 @@ fn run_cert_store(
     command: CertStoreCommand,
     config_file: Option<PathBuf>,
 ) -> Result<ExitCode, Report> {
+    let config_path = ConfigPath::new(config_file).wrap_err("cannot find configuration path")?;
+    let config = Config::from_file_or_user_default(&config_path)?;
     match command {
         CertStoreCommand::Sync {
             store,
@@ -105,17 +104,18 @@ fn run_cert_store(
             distro,
             allow_revoked,
         } => {
+            let store = store.resolve(&config)?;
             let distro = match distro {
                 Some(distro) => distro,
                 None => detect_distro()?,
             };
             let strategy = distro.strategy(bundle)?;
             let certificates = strategy.load()?;
-            let revocation_store = revocation_store(config_file)?;
+            let revocation_store = Store::from_config(&config);
             let certificates = filter_revoked(certificates, &revocation_store, allow_revoked)?;
             let mut certificate_store = open_certificate_store(&store)?;
             strategy.reconcile(&mut certificate_store, &certificates)?;
-            certificate_store.save(&store)?;
+            save_certificate_store(&certificate_store, &store)?;
             eprintln!(
                 "Synchronized {} snapshot with {} certificates to {}",
                 distro,
@@ -127,6 +127,7 @@ fn run_cert_store(
             store,
             allow_revoked,
         } => {
+            let store = store.resolve(&config)?;
             let mut reader = BufReader::new(stdin());
             let certificates = CertificateDer::pem_reader_iter(&mut reader)
                 .collect::<Result<Vec<_>, _>>()
@@ -134,13 +135,13 @@ fn run_cert_store(
             if certificates.is_empty() {
                 bail!("standard input contains no certificates");
             }
-            let revocation_store = revocation_store(config_file)?;
+            let revocation_store = Store::from_config(&config);
             let certificates = filter_revoked(certificates, &revocation_store, allow_revoked)?;
             let mut certificate_store = open_certificate_store(&store)?;
             for certificate in &certificates {
                 certificate_store.add(certificate.as_ref())?;
             }
-            certificate_store.save(&store)?;
+            save_certificate_store(&certificate_store, &store)?;
             eprintln!(
                 "Imported {} manual certificates to {}",
                 certificates.len(),
@@ -148,6 +149,7 @@ fn run_cert_store(
             );
         }
         CertStoreCommand::List { store, show_source } => {
+            let store = store.resolve(&config)?;
             let certificate_store = CertificateStore::open(&store)?;
             for (fingerprint, _) in certificate_store.iter() {
                 if show_source {
@@ -161,6 +163,7 @@ fn run_cert_store(
             }
         }
         CertStoreCommand::Export { store, fingerprint } => {
+            let store = store.resolve(&config)?;
             let certificate_store = CertificateStore::open(&store)?;
             let fingerprint = Fingerprint::from_hex(&fingerprint)?;
             let der = certificate_store
@@ -169,48 +172,69 @@ fn run_cert_store(
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(der)?;
         }
-        CertStoreCommand::Verify { store, server_name } => {
-            let server_name = ServerName::try_from(server_name).wrap_err("invalid server name")?;
+        CertStoreCommand::Verify { store } => {
+            let store = store.resolve(&config)?;
             let certificate_store =
                 CertificateStore::open(&store).wrap_err("cannot open certificate store")?;
-            let mut roots = RootCertStore::empty();
             for (fingerprint, der) in certificate_store.iter() {
-                roots
-                    .add(CertificateDer::from(der))
+                webpki::anchor_from_trusted_cert(&CertificateDer::from(der))
                     .wrap_err_with(|| format!("invalid trust anchor: {}", fingerprint.to_hex()))?;
             }
-            if roots.is_empty() {
+            if certificate_store.is_empty() {
                 bail!("cannot build certificate verifier: no trust anchors");
             }
-            let verifier = rustls_upki::ServerVerifier::new(
-                rustls_upki::Policy {
-                    missing_data: rustls_upki::Outcome::Allowed,
-                    ..Default::default()
-                },
-                config_file,
-                Arc::new(roots),
-                Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
-            )
-            .wrap_err("cannot build certificate verifier")?;
             let certificates = CertificateDer::pem_reader_iter(&mut BufReader::new(stdin()))
                 .collect::<Result<Vec<_>, _>>()
                 .wrap_err("cannot parse certificates from stdin")?;
             let (end_entity, intermediates) = certificates
                 .split_first()
                 .ok_or_else(|| eyre::eyre!("standard input contains no certificates"))?;
-            verifier
-                .verify_server_cert(
+            let verified = certificate_store
+                .verify_chain(
                     end_entity,
                     intermediates,
-                    &server_name,
-                    &[],
+                    &AnyPurpose,
+                    rustls::crypto::aws_lc_rs::default_provider()
+                        .signature_verification_algorithms
+                        .all,
                     UnixTime::now(),
                 )
                 .wrap_err("certificate verification failed")?;
+            let anchor = certificate_store
+                .get(&verified.anchor())
+                .expect("verified anchor belongs to the store");
+            let mut verified_certificates = vec![end_entity.clone()];
+            verified_certificates.extend_from_slice(verified.intermediates());
+            verified_certificates.push(CertificateDer::from(anchor));
+            let input = RevocationCheckInput::from_certificates(&verified_certificates)
+                .wrap_err("cannot prepare certificate revocation check")?;
+            if !input.sct_timestamps.is_empty() {
+                match Store::from_config(&config).check(&input) {
+                    Ok(RevocationStatus::CertainlyRevoked) => {
+                        bail!("certificate verification failed: Revoked");
+                    }
+                    Ok(_) | Err(upki::revocation::Error::NoData { .. }) => {}
+                    Err(error) => {
+                        return Err(error).wrap_err("cannot check certificate revocation");
+                    }
+                }
+            }
             println!("Verified");
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+struct AnyPurpose;
+
+impl webpki::ExtendedKeyUsageValidator for AnyPurpose {
+    fn validate(&self, iter: webpki::KeyPurposeIdIter<'_, '_>) -> Result<(), webpki::Error> {
+        // Purpose belongs to the consumer, but malformed EKU DER is still an error.
+        for purpose in iter {
+            purpose?;
+        }
+        Ok(())
+    }
 }
 
 fn detect_distro() -> Result<CertStoreDistro, Report> {
@@ -242,10 +266,15 @@ fn source_name(source: upki::cert_store::CertificateSource) -> &'static str {
     }
 }
 
-fn revocation_store(config_file: Option<PathBuf>) -> Result<Store, Report> {
-    let config_path = ConfigPath::new(config_file).wrap_err("cannot find configuration path")?;
-    let config = Config::from_file_or_user_default(&config_path)?;
-    Ok(Store::from_config(&config))
+fn save_certificate_store(store: &CertificateStore, path: &std::path::Path) -> Result<(), Report> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent).wrap_err("cannot create certificate store directory")?;
+    }
+    store.save(path)?;
+    Ok(())
 }
 
 fn filter_revoked(
@@ -347,30 +376,28 @@ enum Command {
 enum CertStoreCommand {
     /// Verify a PEM certificate chain from standard input against the store.
     ///
-    /// The first certificate must be the TLS server's end-entity certificate,
+    /// The first certificate must be the end-entity certificate,
     /// followed by any intermediates. Only certificates in the store are trusted;
     /// roots supplied on stdin do not establish trust.
     ///
-    /// Checks signatures, validity dates, server-auth usage, and the server name.
+    /// Checks signatures, validity dates, and a path to a stored trust anchor.
+    /// Does not check names or application purpose (EKU); consumers must do so.
     /// Checks leaf revocation when local data is available. Missing data or
     /// coverage is allowed. Does not fetch missing intermediates or revocation data.
     /// Prints "Verified" and exits 0 on success; errors exit 1.
     Verify {
-        /// Store snapshot file containing trusted certificates.
-        #[arg(long)]
-        store: PathBuf,
-        /// Expected DNS name or IP address (not a URL).
-        #[arg(long)]
-        server_name: String,
+        #[command(flatten)]
+        store: StoreOptions,
     },
 
-    /// Replace distro-managed entries from the generated system certificate source.
+    /// Import the generated system certificate source into upki's snapshot.
     ///
     /// Run after the distro updates its trust store, such as from a package hook.
+    /// Reconciles distro-managed entries only inside upki's snapshot; it does not
+    /// replace system trust files or redirect applications to this store.
     Sync {
-        /// Destination snapshot file.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// Distro adapter to use (autodetected when omitted).
         #[arg(long, value_enum)]
         distro: Option<CertStoreDistro>,
@@ -384,9 +411,8 @@ enum CertStoreCommand {
 
     /// Import administrator-managed certificates from PEM on standard input.
     Import {
-        /// Destination snapshot file.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// Allow certificates known to be revoked by the local revocation data.
         #[arg(long)]
         allow_revoked: bool,
@@ -394,9 +420,8 @@ enum CertStoreCommand {
 
     /// Print fingerprints for certificates in a store.
     List {
-        /// Store snapshot file.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// Include whether each certificate is manual or distro-managed.
         #[arg(long)]
         show_source: bool,
@@ -404,13 +429,32 @@ enum CertStoreCommand {
 
     /// Write one certificate's DER bytes to standard output.
     Export {
-        /// Store snapshot file.
-        #[arg(long)]
-        store: PathBuf,
+        #[command(flatten)]
+        store: StoreOptions,
         /// 64-digit hexadecimal SHA-256 fingerprint.
         #[arg(long)]
         fingerprint: String,
     },
+}
+
+#[derive(Debug, ClapArgs)]
+struct StoreOptions {
+    /// Snapshot path (default: UPKI_CERT_STORE, config cert-store, or cache-dir/certificates.store).
+    #[arg(long)]
+    store: Option<PathBuf>,
+}
+
+impl StoreOptions {
+    fn resolve(self, config: &Config) -> Result<PathBuf, Report> {
+        let path = self
+            .store
+            .or_else(|| std::env::var_os("UPKI_CERT_STORE").map(PathBuf::from))
+            .unwrap_or_else(|| config.cert_store_path_or_default());
+        if path.as_os_str().is_empty() {
+            bail!("certificate store path must not be empty");
+        }
+        Ok(path)
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

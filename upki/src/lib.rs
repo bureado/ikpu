@@ -96,6 +96,19 @@ impl Config {
         self.cert_store.as_deref()
     }
 
+    /// The configured snapshot path, or `certificates.store` in the cache directory.
+    ///
+    /// CLI callers may override this with a command-line option or environment
+    /// variable. Explicit library integrations remain opt-in via `cert_store_path`.
+    pub fn cert_store_path_or_default(&self) -> PathBuf {
+        self.cert_store
+            .clone()
+            .unwrap_or_else(|| {
+                self.cache_dir
+                    .join("certificates.store")
+            })
+    }
+
     pub(crate) fn revocation_cache_dir(&self) -> PathBuf {
         self.cache_dir.join("revocation")
     }

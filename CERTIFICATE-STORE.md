@@ -90,6 +90,14 @@ system paths, and OpenSSL compatibility notes are specified in
 The CLI does not invoke `update-ca-certificates` itself or install package
 hooks.
 
+`sync` is ingestion, not deployment: it imports the distro source into upki's
+independent snapshot and reconciles only that snapshot's distro-managed records.
+It never replaces system trust files or redirects consumers. A future
+`upki cert-store serve` subcommand should own replacement/presentation, with
+explicit destinations, permissions, atomic updates, rollback, and consumer
+reload semantics. This is separate future work, not a currently available
+command.
+
 ## Experimental verification interfaces
 
 The feature prototype separates selecting anchors from verifying a particular
@@ -161,17 +169,30 @@ only a server-auth anchor projection; it does not retain arbitrary p11-kit
 trust or distrust objects. Presentation remains explicitly unsupported.
 ## Verifying a presented certificate
 
+All `cert-store` subcommands accept an optional `--store`. Resolution is
+`--store` > `UPKI_CERT_STORE` > config `cert-store` > `cache-dir/certificates.store`.
+The fallback shares the configured/default cache directory with revocation
+data. Sync/import create missing parent directories; reads require an existing
+snapshot. Empty override paths are rejected. This CLI fallback does not
+implicitly enable certificate-store trust in library consumers, which remain
+opt-in through the configuration key.
+
 `upki cert-store verify` reads a PEM chain from standard input, with the leaf
 first and any intermediates following it:
 
 ```sh
 cat server-chain.pem | upki cert-store verify \
-  --store /var/lib/upki/certificates.store --server-name example.com
+  --store /var/lib/upki/certificates.store
 ```
 
-The required `--server-name` is a DNS name or IP address, not a URL. Rustls'
-WebPKI server verifier checks the chain's signatures, validity dates, TLS
-server-auth usage, and name at the current time. Every certificate in the
+The command uses `CertificateStore::verify_chain` with WebPKI to check
+signatures, validity dates, CA/path constraints, and a path to a stored anchor
+at the current time. It is purpose-neutral, not a TLS server verifier:
+`--server-name` has been removed, and no particular EKU is required. EKU DER
+must still be well-formed. Applications remain responsible for names, intended
+purpose, content signatures, and protocol policy. The Rustls/OpenSSL adapters
+continue to enforce the consuming stack's purpose and identity checks.
+Every certificate in the
 snapshot is an explicit trust anchor, regardless of provenance; no system or
 built-in roots are added, and roots supplied on stdin do not establish trust.
 As with ordinary TLS trust anchors, the anchor's own signature and validity
@@ -185,6 +206,8 @@ Verification loads the usual configuration (or defaults), including
 data. A revocation match fails verification with exit 1. Missing data, missing
 SCTs, or lack of coverage do not fail verification; no revocation data is
 downloaded. Use `upki fetch` to populate or update the local data.
+The issuer for this check comes from the verified path, including the selected
+stored anchor for directly issued leaves, not from arbitrary input ordering.
 This operation does not recover distro purpose/distrust attributes that were
 lost when generating the ingested PEM bundle.
 
@@ -198,13 +221,11 @@ lost when generating the ingested PEM bundle.
    coverage for Debian/Ubuntu and the Fedora/RHEL p11-kit adapter. Validate
    actual RPM transaction ordering and the supported release matrix.
    Evaluate Alpine's bundle-only case and other p11-kit distro integrations.
-3. **Provide useful queries.** Add a CLI verification operation that validates
-   a presented chain and name against the loaded roots, plus certificate
-   lookup/export by stable fingerprint. Define policy for missing, malformed,
-   expired, or distrusted roots before wiring it into TLS consumers.
-   coverage for Debian/Ubuntu, then add a `p11-kit` adapter for Fedora/RHEL
-   rather than assuming identical semantics. Evaluate Alpine's bundle-only case.
-4. **Expand useful queries.** CLI chain/name verification and certificate
+3. **Provide useful queries.** Purpose-neutral CLI chain verification and
+   certificate lookup/export by stable fingerprint are implemented. Define
+   policy for missing, malformed, expired, or distrusted roots before wiring
+   the snapshot into consumers.
+4. **Expand useful queries.** CLI chain verification and certificate
    lookup/export by stable fingerprint are implemented. Extend the explicit
    trust-anchor policy to model distro purpose and distrust attributes before
    wiring the snapshot into TLS consumers.
@@ -212,7 +233,8 @@ lost when generating the ingested PEM bundle.
    an OpenSSL trust-store integration. Keep existing OpenSSL revocation
    callback behavior distinct from trust-anchor selection; test that the new
    path never weakens ordinary chain, hostname, or signature verification.
-6. **Offer compatibility views.** Generate conventional PEM/hash-directory
+6. **Offer compatibility views.** Design `cert-store serve` for explicit
+   replacement/presentation, separate from `sync` ingestion. Generate conventional PEM/hash-directory
    exports first. Only then assess a read-only FUSE projection and container
    runtime mount support. Prefer explicit host-generated snapshots or mounts
    over requiring FUSE inside containers, which is commonly unavailable or
