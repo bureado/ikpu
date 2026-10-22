@@ -13,7 +13,7 @@ use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use upki::cert_store::distro::{DebianUbuntu, FedoraRhel, IngestionStrategy};
+use upki::cert_store::distro::{Alpine, CaCertificates, FedoraRhel, IngestionStrategy};
 use upki::cert_store::{CertificateStore, Fingerprint};
 #[cfg(feature = "__fetch")]
 use upki::fetch;
@@ -247,6 +247,7 @@ fn distro_from_id(id: &str) -> Result<CertStoreDistro, Report> {
     match id {
         "debian" => Ok(CertStoreDistro::Debian),
         "ubuntu" => Ok(CertStoreDistro::Ubuntu),
+        "alpine" => Ok(CertStoreDistro::Alpine),
         "fedora" => Ok(CertStoreDistro::Fedora),
         "rhel" => Ok(CertStoreDistro::Rhel),
         "centos" => Ok(CertStoreDistro::Centos),
@@ -401,7 +402,7 @@ enum CertStoreCommand {
         /// Distro adapter to use (autodetected when omitted).
         #[arg(long, value_enum)]
         distro: Option<CertStoreDistro>,
-        /// Override the Debian/Ubuntu generated bundle path (not supported by Fedora/RHEL).
+        /// Override the Debian/Ubuntu/Alpine generated bundle path (not supported by Fedora/RHEL).
         #[arg(long)]
         bundle: Option<PathBuf>,
         /// Allow certificates known to be revoked by the local revocation data.
@@ -461,6 +462,7 @@ impl StoreOptions {
 enum CertStoreDistro {
     Debian,
     Ubuntu,
+    Alpine,
     Fedora,
     Rhel,
     Centos,
@@ -472,7 +474,8 @@ enum CertStoreDistro {
 impl CertStoreDistro {
     fn strategy(self, bundle: Option<PathBuf>) -> Result<Box<dyn IngestionStrategy>, Report> {
         match self {
-            Self::Debian | Self::Ubuntu => Ok(Box::new(DebianUbuntu::new(bundle))),
+            Self::Debian | Self::Ubuntu => Ok(Box::new(CaCertificates::new(bundle))),
+            Self::Alpine => Ok(Box::new(Alpine::new(bundle))),
             Self::Fedora
             | Self::Rhel
             | Self::Centos
@@ -481,7 +484,7 @@ impl CertStoreDistro {
             | Self::OracleLinux => {
                 if bundle.is_some() {
                     bail!(
-                        "--bundle is only supported by Debian/Ubuntu; Fedora/RHEL requires p11-kit policy extraction"
+                        "--bundle is only supported by Debian/Ubuntu/Alpine; Fedora/RHEL requires p11-kit policy extraction"
                     );
                 }
                 Ok(Box::new(FedoraRhel::new()))
@@ -495,6 +498,7 @@ impl fmt::Display for CertStoreDistro {
         match self {
             Self::Debian => f.write_str("Debian"),
             Self::Ubuntu => f.write_str("Ubuntu"),
+            Self::Alpine => f.write_str("Alpine"),
             Self::Fedora => f.write_str("Fedora"),
             Self::Rhel => f.write_str("RHEL"),
             Self::Centos => f.write_str("CentOS"),
@@ -541,6 +545,10 @@ mod tests {
             distro_from_id("debian").unwrap(),
             CertStoreDistro::Debian
         ));
+        assert!(matches!(
+            distro_from_id("alpine").unwrap(),
+            CertStoreDistro::Alpine
+        ));
         for id in ["fedora", "rhel", "centos", "rocky", "almalinux", "ol"] {
             let strategy = distro_from_id(id)
                 .unwrap()
@@ -553,13 +561,24 @@ mod tests {
         }
         assert!(distro_from_id("arch").is_err());
         assert!(distro_from_id("opensuse-leap").is_err());
-        assert!(distro_from_id("alpine").is_err());
+        assert_eq!(
+            distro_from_id("alpine")
+                .unwrap()
+                .strategy(None)
+                .unwrap()
+                .source_path(),
+            std::path::Path::new("/etc/ssl/certs/ca-certificates.crt")
+        );
     }
 
     #[test]
-    fn bundle_overrides_are_only_supported_for_debian_ubuntu() {
+    fn bundle_overrides_are_supported_for_pem_bundle_distros() {
         let bundle = PathBuf::from("/test/bundle.pem");
-        for distro in [CertStoreDistro::Debian, CertStoreDistro::Ubuntu] {
+        for distro in [
+            CertStoreDistro::Debian,
+            CertStoreDistro::Ubuntu,
+            CertStoreDistro::Alpine,
+        ] {
             let strategy = distro
                 .strategy(Some(bundle.clone()))
                 .unwrap();
