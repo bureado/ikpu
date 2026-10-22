@@ -16,7 +16,9 @@ __fetch = ["upki/__fetch"]
 [dependencies]
 clap.workspace = true
 eyre.workspace = true
+rustls = { workspace = true, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-pki-types.workspace = true
+rustls-upki = { version = "1", path = "../rustls-upki" }
 upki = { version = "1", path = "../upki" }
 tokio.workspace = true
 toml.workspace = true
@@ -25,10 +27,13 @@ tracing-subscriber.workspace = true
 whatadistro.workspace = true
 
 [dev-dependencies]
+clubcard.workspace = true
+clubcard-crlite = { workspace = true, features = ["builder"] }
 jiff.workspace = true
 insta.workspace = true
 insta-cmd.workspace = true
 regex.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 tempfile.workspace = true
 tiny_http.workspace = true
 

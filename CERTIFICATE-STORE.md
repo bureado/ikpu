@@ -86,6 +86,35 @@ system paths, and OpenSSL compatibility notes are specified in
 The CLI does not invoke `update-ca-certificates` itself or install package
 hooks.
 
+## Verifying a presented certificate
+
+`upki cert-store verify` reads a PEM chain from standard input, with the leaf
+first and any intermediates following it:
+
+```sh
+cat server-chain.pem | upki cert-store verify \
+  --store /var/lib/upki/certificates.store --server-name example.com
+```
+
+The required `--server-name` is a DNS name or IP address, not a URL. Rustls'
+WebPKI server verifier checks the chain's signatures, validity dates, TLS
+server-auth usage, and name at the current time. Every certificate in the
+snapshot is an explicit trust anchor, regardless of provenance; no system or
+built-in roots are added, and roots supplied on stdin do not establish trust.
+As with ordinary TLS trust anchors, the anchor's own signature and validity
+period are not checked. Only import certificates you intend to trust.
+
+Success prints `Verified` and exits 0. Rejected certificates, unreadable or
+corrupt stores, empty stores, invalid anchors, and malformed or empty input
+report an error on stderr and exit 1. Missing intermediates are not fetched.
+Verification loads the usual configuration (or defaults), including
+`--config-file` when supplied, and checks the leaf against local revocation
+data. A revocation match fails verification with exit 1. Missing data, missing
+SCTs, or lack of coverage do not fail verification; no revocation data is
+downloaded. Use `upki fetch` to populate or update the local data.
+This operation does not recover distro purpose/distrust attributes that were
+lost when generating the ingested PEM bundle.
+
 ## Proposed roadmap
 
 1. **Harden the core model.** Decide whether records represent certificates
@@ -95,10 +124,10 @@ hooks.
 2. **Expand distro adapters.** Add fixture-based package-hook and upgrade
    coverage for Debian/Ubuntu, then add a `p11-kit` adapter for Fedora/RHEL
    rather than assuming identical semantics. Evaluate Alpine's bundle-only case.
-3. **Provide useful queries.** Add a CLI verification operation that validates
-   a presented chain and name against the loaded roots, plus certificate
-   lookup/export by stable fingerprint. Define policy for missing, malformed,
-   expired, or distrusted roots before wiring it into TLS consumers.
+3. **Expand useful queries.** CLI chain/name verification and certificate
+   lookup/export by stable fingerprint are implemented. Extend the explicit
+   trust-anchor policy to model distro purpose and distrust attributes before
+   wiring the snapshot into TLS consumers.
 4. **Integrate TLS libraries.** Add a Rustls root-store/verifier adapter and
    an OpenSSL trust-store integration. Keep existing OpenSSL revocation
    callback behavior distinct from trust-anchor selection; test that the new

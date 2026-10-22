@@ -99,8 +99,24 @@ the configured local revocation data and skip revoked certificates unless
 `--allow-revoked` is explicitly supplied. The commands require usable
 revocation data and issuer certificates in the supplied set.
 
-This store does not yet verify certificate chains or reproduce distro
-trust/distrust policy, and certificate presentation is not implemented.
+To verify a TLS server certificate against the managed snapshot, pipe a PEM
+chain (leaf first, then intermediates) and specify the expected DNS name or IP:
+
+```shell
+cat server-chain.pem | upki cert-store verify \
+  --store /var/lib/upki/certificates.store --server-name example.com
+```
+
+This checks signatures, validity dates, server-auth usage, and the server name
+using only the stored trust anchors. It prints `Verified` and exits 0 on
+success; errors exit 1. It also checks the leaf against local revocation data
+and fails on a match. Missing data, missing SCTs, or lack of coverage are
+allowed. It uses the usual configuration or defaults and does not download
+intermediates or revocation data. All stored certificates are treated as
+trust anchors, so only import certificates you intend to trust.
+
+The store does not reproduce distro trust/distrust policy, and certificate
+presentation is not implemented.
 See [CERTIFICATE-STORE.md](CERTIFICATE-STORE.md) and the
 [Debian/Ubuntu adapter specification](upki/src/cert_store/distro/README.md)
 for assumptions and limitations.
