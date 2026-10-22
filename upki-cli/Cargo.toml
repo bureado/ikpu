@@ -16,6 +16,7 @@ __fetch = ["upki/__fetch"]
 [dependencies]
 clap.workspace = true
 eyre.workspace = true
+rustls = { workspace = true, features = ["aws-lc-rs", "std", "tls12"] }
 rustls-pki-types.workspace = true
 upki = { version = "1", path = "../upki" }
 tokio.workspace = true
@@ -29,6 +30,7 @@ jiff.workspace = true
 insta.workspace = true
 insta-cmd.workspace = true
 regex.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 tempfile.workspace = true
 tiny_http.workspace = true
 

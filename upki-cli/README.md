@@ -57,8 +57,29 @@ Manual entries take precedence over distro entries and survive authoritative
 syncs. The Debian/Ubuntu strategy is documented in
 [its specification](../upki/src/cert_store/distro/README.md).
 
-The store preserves certificate bytes and provenance; it does not perform
-certificate-chain verification or reproduce distro trust/distrust attributes.
+Verify a TLS server certificate against the managed store by piping a PEM chain,
+with the leaf first and any intermediates after it:
+
+```sh
+cat server-chain.pem | upki cert-store verify \
+  --store /var/lib/upki/certificates.store --server-name example.com
+# Or obtain the chain using curl:
+curl -sS -o /dev/null -w '%{certs}' https://example.com | \
+  upki cert-store verify --store /var/lib/upki/certificates.store --server-name example.com
+```
+
+Verification checks the chain's signatures, validity dates, TLS server-auth
+usage, and the expected DNS name or IP address at the current time. Only the
+snapshot supplies trust anchors; certificates on stdin do not establish trust.
+It prints `Verified` and exits 0 on success, or reports an error on stderr and
+exits 1. Both `--store` and `--server-name` are required. Missing intermediates
+are not downloaded. No upki configuration or revocation data is needed.
+
+This is a trust check, not a revocation check; use `upki revocation check`
+separately for revocation status. The store preserves certificate bytes and
+provenance but does not reproduce distro trust/distrust attributes. Every
+stored certificate is used as a trust anchor regardless of provenance, so
+only import certificates you intend to trust.
 
 ## License
 

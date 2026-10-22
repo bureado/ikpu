@@ -4,11 +4,15 @@ use core::fmt;
 use std::io::{BufReader, Write, stdin};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use eyre::{Context, Report, bail};
-use rustls_pki_types::CertificateDer;
+use rustls::RootCertStore;
+use rustls::client::WebPkiServerVerifier;
+use rustls::client::danger::ServerCertVerifier;
 use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -166,6 +170,39 @@ fn run_cert_store(
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(der)?;
         }
+        CertStoreCommand::Verify { store, server_name } => {
+            let server_name = ServerName::try_from(server_name).wrap_err("invalid server name")?;
+            let certificate_store =
+                CertificateStore::open(&store).wrap_err("cannot open certificate store")?;
+            let mut roots = RootCertStore::empty();
+            for (fingerprint, der) in certificate_store.iter() {
+                roots
+                    .add(CertificateDer::from(der))
+                    .wrap_err_with(|| format!("invalid trust anchor: {}", fingerprint.to_hex()))?;
+            }
+            let verifier = WebPkiServerVerifier::builder_with_provider(
+                Arc::new(roots),
+                Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+            )
+            .build()
+            .wrap_err("cannot build certificate verifier")?;
+            let certificates = CertificateDer::pem_reader_iter(&mut BufReader::new(stdin()))
+                .collect::<Result<Vec<_>, _>>()
+                .wrap_err("cannot parse certificates from stdin")?;
+            let (end_entity, intermediates) = certificates
+                .split_first()
+                .ok_or_else(|| eyre::eyre!("standard input contains no certificates"))?;
+            verifier
+                .verify_server_cert(
+                    end_entity,
+                    intermediates,
+                    &server_name,
+                    &[],
+                    UnixTime::now(),
+                )
+                .wrap_err("certificate verification failed")?;
+            println!("Verified");
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -296,6 +333,24 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum CertStoreCommand {
+    /// Verify a PEM certificate chain from standard input against the store.
+    ///
+    /// The first certificate must be the TLS server's end-entity certificate,
+    /// followed by any intermediates. Only certificates in the store are trusted;
+    /// roots supplied on stdin do not establish trust.
+    ///
+    /// Checks signatures, validity dates, server-auth usage, and the server name.
+    /// This does not check revocation or fetch missing intermediates.
+    /// Prints "Verified" and exits 0 on success; errors exit 1.
+    Verify {
+        /// Store snapshot file containing trusted certificates.
+        #[arg(long)]
+        store: PathBuf,
+        /// Expected DNS name or IP address (not a URL).
+        #[arg(long)]
+        server_name: String,
+    },
+
     /// Replace distro-managed entries from the generated system certificate source.
     ///
     /// Run after the distro updates its trust store, such as from a package hook.
